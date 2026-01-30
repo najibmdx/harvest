@@ -319,10 +319,10 @@ def extract_swaps_from_event(
     native_output = swap.get("nativeOutput") if isinstance(swap.get("nativeOutput"), dict) else {}
 
     native_in_amount = coerce_amount_str(
-        native_input.get("amount") or native_input.get("lamports") or native_input.get("nativeAmount")
+        native_input.get("lamports") or native_input.get("amount") or native_input.get("nativeAmount")
     )
     native_out_amount = coerce_amount_str(
-        native_output.get("amount") or native_output.get("lamports") or native_output.get("nativeAmount")
+        native_output.get("lamports") or native_output.get("amount") or native_output.get("nativeAmount")
     )
 
     swaps: List[Dict[str, Any]] = []
@@ -417,7 +417,7 @@ def extract_swaps_from_transfers(
         for t in native_transfers:
             if not isinstance(t, dict):
                 continue
-            amount_raw = t.get("amount") or t.get("lamports") or t.get("nativeAmount")
+            amount_raw = t.get("lamports") or t.get("amount") or t.get("nativeAmount")
             amount_int = parse_int_amount(amount_raw)
             if amount_int is None:
                 continue
