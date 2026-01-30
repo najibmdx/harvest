@@ -68,6 +68,36 @@ def handle_wallet_pnl_tokens(
     time_clause: str,
     time_params: Sequence[int],
 ) -> None:
+    rows = fetch_wallet_pnl_tokens(conn, wallet, time_clause, time_params)
+    rows.sort(
+        key=lambda r: (r["realized_pnl"], r["sol_received"]),
+        reverse=True,
+    )
+    if limit:
+        rows = rows[:limit]
+
+    table_rows = [
+        [
+            r["token_mint"],
+            str(r["trade_count"]),
+            format_sol(r["sol_spent"]),
+            format_sol(r["sol_received"]),
+            format_sol(r["realized_pnl"]),
+        ]
+        for r in rows
+    ]
+    print_table(
+        ["token_mint", "trade_count", "sol_spent", "sol_received", "realized_pnl_sol"],
+        table_rows,
+    )
+
+
+def fetch_wallet_pnl_tokens(
+    conn: sqlite3.Connection,
+    wallet: str,
+    time_clause: str,
+    time_params: Sequence[int],
+) -> List[dict]:
     sql = f"""
         SELECT token_mint,
                SUM(CASE WHEN sol_direction = 'buy' THEN sol_amount_lamports ELSE 0 END) AS sol_spent_lamports,
@@ -95,28 +125,7 @@ def handle_wallet_pnl_tokens(
                 "realized_pnl": realized_pnl,
             }
         )
-
-    rows.sort(
-        key=lambda r: (r["realized_pnl"], r["sol_received"]),
-        reverse=True,
-    )
-    if limit:
-        rows = rows[:limit]
-
-    table_rows = [
-        [
-            r["token_mint"],
-            str(r["trade_count"]),
-            format_sol(r["sol_spent"]),
-            format_sol(r["sol_received"]),
-            format_sol(r["realized_pnl"]),
-        ]
-        for r in rows
-    ]
-    print_table(
-        ["token_mint", "trade_count", "sol_spent", "sol_received", "realized_pnl_sol"],
-        table_rows,
-    )
+    return rows
 
 
 def handle_top_pnl_wallets(
