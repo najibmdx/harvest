@@ -10,7 +10,62 @@ import sqlite3
 from decimal import Decimal
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from db_qa_shell import build_time_clause, fetch_wallet_pnl_tokens, format_sol
+SOL_LAMPORTS = Decimal("1000000000")
+
+
+def build_time_clause(start_ts: Optional[int], end_ts: Optional[int]) -> Tuple[str, List[int]]:
+    if start_ts is None and end_ts is None:
+        return "", []
+    if start_ts is not None and end_ts is not None:
+        return " AND block_time BETWEEN ? AND ?", [start_ts, end_ts]
+    if start_ts is not None:
+        return " AND block_time >= ?", [start_ts]
+    return " AND block_time <= ?", [end_ts]
+
+
+def lamports_to_sol(lamports: int) -> Decimal:
+    return Decimal(lamports) / SOL_LAMPORTS
+
+
+def format_sol(value: Decimal) -> str:
+    formatted = f"{value:.9f}"
+    return formatted.rstrip("0").rstrip(".") if formatted else "0"
+
+
+def fetch_wallet_pnl_tokens(
+    conn: sqlite3.Connection,
+    wallet: str,
+    time_clause: str,
+    time_params: Sequence[int],
+) -> List[dict]:
+    sql = f"""
+        SELECT token_mint,
+               SUM(CASE WHEN sol_direction='buy' THEN sol_amount_lamports ELSE 0 END) AS sol_spent_lamports,
+               SUM(CASE WHEN sol_direction='sell' THEN sol_amount_lamports ELSE 0 END) AS sol_received_lamports,
+               COUNT(*) AS trade_count
+        FROM swaps
+        WHERE scan_wallet = ?
+          AND has_sol_leg = 1
+          AND token_mint IS NOT NULL
+          {time_clause}
+        GROUP BY token_mint
+    """
+    cur = conn.execute(sql, [wallet, *time_params])
+    rows = []
+    for token_mint, sol_spent_lamports, sol_received_lamports, trade_count in cur.fetchall():
+        sol_spent = lamports_to_sol(int(sol_spent_lamports or 0))
+        sol_received = lamports_to_sol(int(sol_received_lamports or 0))
+        realized_pnl = sol_received - sol_spent
+        rows.append(
+            {
+                "token_mint": token_mint,
+                "trade_count": int(trade_count or 0),
+                "sol_spent": sol_spent,
+                "sol_received": sol_received,
+                "realized_pnl": realized_pnl,
+            }
+        )
+    return rows
 
 
 def ensure_outdir(path: str) -> None:
