@@ -29,6 +29,7 @@ import os
 import sqlite3
 import sys
 import time
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -319,10 +320,10 @@ def extract_swaps_from_event(
     native_output = swap.get("nativeOutput") if isinstance(swap.get("nativeOutput"), dict) else {}
 
     native_in_amount = coerce_amount_str(
-        native_input.get("amount") or native_input.get("lamports") or native_input.get("nativeAmount")
+        native_input.get("lamports") or native_input.get("amount") or native_input.get("nativeAmount")
     )
     native_out_amount = coerce_amount_str(
-        native_output.get("amount") or native_output.get("lamports") or native_output.get("nativeAmount")
+        native_output.get("lamports") or native_output.get("amount") or native_output.get("nativeAmount")
     )
 
     swaps: List[Dict[str, Any]] = []
@@ -417,7 +418,7 @@ def extract_swaps_from_transfers(
         for t in native_transfers:
             if not isinstance(t, dict):
                 continue
-            amount_raw = t.get("amount") or t.get("lamports") or t.get("nativeAmount")
+            amount_raw = t.get("lamports") or t.get("amount") or t.get("nativeAmount")
             amount_int = parse_int_amount(amount_raw)
             if amount_int is None:
                 continue
@@ -459,6 +460,155 @@ def extract_swaps_from_tx(
     if swaps:
         return swaps
     return extract_swaps_from_transfers(rec, scan_wallet, signature, block_time)
+
+
+def parse_decimal_amount(val: Any) -> Optional[Decimal]:
+    if val is None:
+        return None
+    if isinstance(val, Decimal):
+        return val
+    if isinstance(val, int):
+        return Decimal(val)
+    if isinstance(val, float):
+        return Decimal(str(val))
+    if isinstance(val, str):
+        stripped = val.strip()
+        if not stripped:
+            return None
+        try:
+            return Decimal(stripped)
+        except InvalidOperation:
+            return None
+    return None
+
+
+def extract_transfer_amount_raw(entry: Dict[str, Any]) -> Optional[str]:
+    for key in ("rawAmount", "raw_amount", "amount", "amount_raw"):
+        if key in entry:
+            return coerce_amount_str(entry.get(key))
+    token_amount = entry.get("tokenAmount")
+    if isinstance(token_amount, dict):
+        for key in ("amount", "uiAmountString", "uiAmount"):
+            if key in token_amount:
+                return coerce_amount_str(token_amount.get(key))
+    elif token_amount is not None:
+        return coerce_amount_str(token_amount)
+    for key in ("uiAmountString", "uiAmount"):
+        if key in entry:
+            return coerce_amount_str(entry.get(key))
+    return None
+
+
+def backfill_swaps_from_tx_raw_json(
+    conn: sqlite3.Connection,
+    *,
+    batch_size: int = 5000,
+    limit: Optional[int] = None,
+) -> int:
+    inserted = 0
+    remaining = limit
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, scan_wallet, signature, block_time, raw_json, pre_balance_sol, post_balance_sol
+        FROM tx
+        WHERE raw_json IS NOT NULL AND raw_json != ''
+        ORDER BY id
+        """
+    )
+    while True:
+        if remaining is not None and remaining <= 0:
+            break
+        fetch_size = batch_size
+        if remaining is not None:
+            fetch_size = min(fetch_size, remaining)
+        rows = cur.fetchmany(fetch_size)
+        if not rows:
+            break
+        for _, scan_wallet, signature, block_time, raw_json, pre_bal, post_bal in rows:
+            try:
+                rec = json.loads(raw_json)
+            except json.JSONDecodeError:
+                continue
+
+            sol_delta_val = rec.get("balance_delta_SOL")
+            if sol_delta_val is None and pre_bal is not None and post_bal is not None:
+                sol_delta_val = Decimal(str(post_bal)) - Decimal(str(pre_bal))
+            sol_delta = parse_decimal_amount(sol_delta_val)
+            if sol_delta is None or sol_delta == 0:
+                continue
+
+            sol_amount_lamports = int(round(abs(sol_delta) * Decimal("1000000000")))
+            sol_direction = "buy" if sol_delta < 0 else "sell"
+
+            spl_in = rec.get("spl_in_transfers")
+            spl_out = rec.get("spl_out_transfers")
+            candidates: Dict[str, Tuple[Decimal, str]] = {}
+            for transfers in (spl_in, spl_out):
+                if not isinstance(transfers, list):
+                    continue
+                for entry in transfers:
+                    if not isinstance(entry, dict):
+                        continue
+                    mint = entry.get("mint") or entry.get("token") or entry.get("mintAddress")
+                    if not isinstance(mint, str) or not mint or is_sol_mint(mint):
+                        continue
+                    amount_raw = extract_transfer_amount_raw(entry)
+                    amount_dec = parse_decimal_amount(amount_raw)
+                    if amount_dec is None:
+                        continue
+                    abs_amount = abs(amount_dec)
+                    if mint not in candidates or abs_amount > candidates[mint][0]:
+                        candidates[mint] = (abs_amount, amount_raw)
+
+            if not candidates:
+                continue
+
+            if len(candidates) == 1:
+                token_mint, (_, token_amount_raw) = next(iter(candidates.items()))
+            else:
+                token_mint, (_, token_amount_raw) = max(
+                    candidates.items(), key=lambda item: item[1][0]
+                )
+
+            if token_amount_raw is None:
+                continue
+
+            conn.execute(
+                "DELETE FROM swaps WHERE scan_wallet = ? AND signature = ?;",
+                (scan_wallet, signature),
+            )
+            before = conn.total_changes
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO swaps(
+                  scan_wallet, signature, block_time, dex,
+                  in_mint, in_amount_raw, out_mint, out_amount_raw,
+                  has_sol_leg, sol_direction, sol_amount_lamports,
+                  token_mint, token_amount_raw
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    scan_wallet,
+                    signature,
+                    block_time,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    1,
+                    sol_direction,
+                    sol_amount_lamports,
+                    token_mint,
+                    token_amount_raw,
+                ),
+            )
+            if conn.total_changes > before:
+                inserted += 1
+        if remaining is not None:
+            remaining -= len(rows)
+    return inserted
 
 
 def insert_swaps(conn: sqlite3.Connection, swaps: List[Dict[str, Any]]) -> int:
@@ -776,6 +926,10 @@ def main() -> int:
             print(f"[WARN] failed file={fp} err={e}")
 
     conn.commit()
+    backfilled_from_raw = backfill_swaps_from_tx_raw_json(conn)
+    if backfilled_from_raw:
+        conn.commit()
+        total_swaps += backfilled_from_raw
     backfilled_swaps = backfill_swaps(conn)
     if backfilled_swaps:
         conn.commit()
@@ -797,7 +951,11 @@ def main() -> int:
     print(f"Wallets: {wallet_count}")
     print(f"Tx rows: {tx_count} (this run inserted {total_tx})")
     print(f"SPL rows: {total_spl}")
-    print(f"Swaps rows: {total_swaps} (includes backfill {backfilled_swaps})")
+    print(
+        "Swaps rows: "
+        f"{total_swaps} (includes raw backfill {backfilled_from_raw}, "
+        f"events backfill {backfilled_swaps})"
+    )
     if mnmx and mnmx[0] and mnmx[1]:
         print(f"Time window (unix): {mnmx[0]} -> {mnmx[1]}")
     print(f"Elapsed: {elapsed:.2f}s")
