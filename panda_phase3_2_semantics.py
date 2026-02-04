@@ -9,6 +9,7 @@ rules and ranking them by match quality.
 Usage:
     python panda_phase3_2_semantics.py --db masterwalletsdb.db
     python panda_phase3_2_semantics.py --db masterwalletsdb.db --fast
+    python panda_phase3_2_semantics.py --db masterwalletsdb.db --fast-all
     python panda_phase3_2_semantics.py --db masterwalletsdb.db --limit-wallets 10
 """
 
@@ -175,7 +176,7 @@ def load_baseline_events(cursor, whale_map, limit_wallets=None):
     return baseline_events, baseline_keys_strict, baseline_keys_relax, wallet_set
 
 
-def load_flows(cursor, flow_map, wallet_set):
+def load_flows(cursor, flow_map, wallet_set, fast_all=False, fast_max_flows=None, wallet_time_ranges=None):
     """Load flows from wallet_token_flow for wallets in baseline."""
     wallet_col = flow_map['scan_wallet']
     time_col = flow_map['block_time']
@@ -231,6 +232,17 @@ def load_flows(cursor, flow_map, wallet_set):
             'signature': signature,
         }
         flows_by_wallet_dir[(wallet, direction)].append(flow)
+
+    if fast_all and fast_max_flows is not None:
+        truncated_flows_by_wallet_dir = defaultdict(list)
+        for (wallet, direction), flows in flows_by_wallet_dir.items():
+            if wallet_time_ranges and wallet in wallet_time_ranges:
+                min_time, max_time = wallet_time_ranges[wallet]
+                flows = [f for f in flows if min_time <= f['block_time'] <= max_time]
+            if fast_max_flows and len(flows) > fast_max_flows:
+                flows = flows[-fast_max_flows:]
+            truncated_flows_by_wallet_dir[(wallet, direction)] = flows
+        flows_by_wallet_dir = truncated_flows_by_wallet_dir
     
     print(f"Loaded {len(rows)} flows across {len(flows_by_wallet_dir)} wallet-direction pairs")
     
@@ -250,7 +262,16 @@ def get_threshold(window, event_type):
         return None
 
 
-def compute_rolling_window_events(flows, window, direction, threshold, variant, db_anchor_times=None):
+def compute_rolling_window_events(
+    flows,
+    window,
+    direction,
+    threshold,
+    variant,
+    db_anchor_times=None,
+    fast_all=False,
+    fast_anchors=None,
+):
     """
     Compute events for a rolling window using the given semantic variant.
     
@@ -281,6 +302,9 @@ def compute_rolling_window_events(flows, window, direction, threshold, variant, 
             # So we keep duplicates but will handle them in the loop
             anchor_times = sorted([f['block_time'] for f in flows])
     
+    if fast_all and fast_anchors is not None:
+        anchor_times = anchor_times[:fast_anchors]
+
     events = []
     state = {
         'last_emitted_below': True,  # For TRANSITION rule
@@ -419,7 +443,7 @@ def choose_flow_ref(included_flows, ref_rule, threshold):
     return None
 
 
-def recompute_all_events(flows_by_wallet_dir, variant, baseline_events):
+def recompute_all_events(flows_by_wallet_dir, variant, baseline_events, fast_all=False, fast_anchors=None):
     """Recompute all events using the variant semantics."""
     recomputed = []
     recomputed_keys_strict = set()
@@ -450,7 +474,14 @@ def recompute_all_events(flows_by_wallet_dir, variant, baseline_events):
             
             # Compute events
             events = compute_rolling_window_events(
-                flows, window, direction, threshold, variant, db_anchor_times
+                flows,
+                window,
+                direction,
+                threshold,
+                variant,
+                db_anchor_times,
+                fast_all=fast_all,
+                fast_anchors=fast_anchors,
             )
             
             for event_time, flow_ref, amount, count in events:
@@ -854,12 +885,22 @@ def main():
     parser.add_argument('--limit-wallets', type=int, help='Limit number of wallets for testing')
     parser.add_argument('--limit-variants', type=int, help='Limit number of variants to test')
     parser.add_argument('--fast', action='store_true', help='Fast mode: fewer variants, DB_EVENT_TIMES only')
+    parser.add_argument('--fast-all', action='store_true', help='Fast-all mode: all variants with sampling caps')
+    parser.add_argument('--fast-wallets', type=int, default=15, help='Fast-all cap for wallets')
+    parser.add_argument('--fast-anchors', type=int, default=200, help='Fast-all cap for anchor times')
+    parser.add_argument('--fast-max-flows', type=int, help='Fast-all cap for flows per wallet-direction')
     
     args = parser.parse_args()
     
     if not os.path.exists(args.db):
         print(f"ERROR: Database not found: {args.db}")
         sys.exit(1)
+
+    if args.fast_all:
+        print(
+            "FAST-ALL MODE: testing 540 variants with caps: "
+            f"wallets={args.fast_wallets} anchors={args.fast_anchors} max_flows={args.fast_max_flows}"
+        )
     
     print("Connecting to database...")
     conn = sqlite3.connect(args.db)
@@ -878,12 +919,33 @@ def main():
     
     # Load data
     print("\n--- Loading Baseline Events ---")
+    limit_wallets = args.limit_wallets
+    if args.fast_all and limit_wallets is None:
+        limit_wallets = args.fast_wallets
     baseline_events, baseline_keys_strict, baseline_keys_relax, wallet_set = load_baseline_events(
-        cursor, whale_map, args.limit_wallets
+        cursor, whale_map, limit_wallets
     )
     
     print("\n--- Loading Flows ---")
-    flows_by_wallet_dir = load_flows(cursor, flow_map, wallet_set)
+    wallet_time_ranges = None
+    if args.fast_all and args.fast_max_flows is not None:
+        wallet_time_ranges = {}
+        for event in baseline_events:
+            wallet = event['wallet']
+            event_time = event['event_time']
+            if wallet not in wallet_time_ranges:
+                wallet_time_ranges[wallet] = (event_time, event_time)
+            else:
+                min_time, max_time = wallet_time_ranges[wallet]
+                wallet_time_ranges[wallet] = (min(min_time, event_time), max(max_time, event_time))
+    flows_by_wallet_dir = load_flows(
+        cursor,
+        flow_map,
+        wallet_set,
+        fast_all=args.fast_all,
+        fast_max_flows=args.fast_max_flows,
+        wallet_time_ranges=wallet_time_ranges,
+    )
     
     conn.close()
     
@@ -891,8 +953,10 @@ def main():
     print("\n--- Generating Variants ---")
     if args.fast:
         print("FAST MODE ENABLED: Using reduced variant set and DB_EVENT_TIMES anchors only")
-    
+
     variants = generate_variants(args.fast)
+    if args.fast_all:
+        variants = generate_variants(False)
     
     if args.limit_variants:
         variants = variants[:args.limit_variants]
@@ -906,7 +970,11 @@ def main():
             print(f"  Tested {i}/{len(variants)} variants...")
         
         recomputed, recomputed_keys_strict, recomputed_keys_relax = recompute_all_events(
-            flows_by_wallet_dir, variant, baseline_events
+            flows_by_wallet_dir,
+            variant,
+            baseline_events,
+            fast_all=args.fast_all,
+            fast_anchors=args.fast_anchors,
         )
         
         score = score_variant(
@@ -942,7 +1010,11 @@ def main():
         
         # Get recomputed_keys_strict from recomputation
         _, recomputed_keys_strict_best, _ = recompute_all_events(
-            flows_by_wallet_dir, best['variant'], baseline_events
+            flows_by_wallet_dir,
+            best['variant'],
+            baseline_events,
+            fast_all=args.fast_all,
+            fast_anchors=args.fast_anchors,
         )
         
         write_mismatches(baseline_events, best['recomputed'], 
