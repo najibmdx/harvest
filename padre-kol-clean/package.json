@@ -1,0 +1,11 @@
+{
+  "name": "padre-kol-clean",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "export:padre-kols": "node scripts/export-padre-kols.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^24.9.0"
+  }
+}
