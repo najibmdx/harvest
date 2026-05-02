@@ -59,6 +59,9 @@ npm run export:padre-kols
 7. Validate Solana-like full addresses and reject obvious truncation.
 8. Reject numeric/internal IDs as display names and fail if all names are numeric/empty.
 9. Deduplicate by wallet; preserve alternate names in JSON `names`.
+5. If network confidence is insufficient, fallback to DOM + copy-button clipboard flow.
+6. Validate Solana-like full addresses and reject obvious truncation.
+7. Deduplicate by wallet; preserve alternate names in JSON `names`.
 
 ## Failure behavior
 If full wallet addresses cannot be recovered, the script exits with a clear error and does not silently emit partial/truncated data.
