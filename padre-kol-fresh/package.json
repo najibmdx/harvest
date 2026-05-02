@@ -1,0 +1,12 @@
+{
+  "name": "padre-kol-fresh",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local-only Padre KOL manager scraper via existing Chrome debug session",
+  "scripts": {
+    "export:padre-kols": "node scripts/export-padre-kols.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^24.9.0"
+  }
+}
