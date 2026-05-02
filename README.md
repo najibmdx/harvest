@@ -46,6 +46,7 @@ npm run export:padre-kols
 - `output/padre_kols.sqlite`
 - `output/debug_network_candidates.json`
 - `output/debug_dom_snapshot.html`
+- `output/debug_dom_rows.json`
 - `output/debug_run_log.txt`
 
 ## Extraction order
@@ -53,6 +54,11 @@ npm run export:padre-kols
 2. Open tracker and activate `KOLs Manager`.
 3. Observe fetch/xhr JSON responses for 15 seconds.
 4. Recursively score candidate wallet+name fields.
+5. Build DOM row evidence from visible KOL rows and candidate display names.
+6. Pair DOM names to full wallets using clipboard-first, fragment match second (hybrid mode).
+7. Validate Solana-like full addresses and reject obvious truncation.
+8. Reject numeric/internal IDs as display names and fail if all names are numeric/empty.
+9. Deduplicate by wallet; preserve alternate names in JSON `names`.
 5. If network confidence is insufficient, fallback to DOM + copy-button clipboard flow.
 6. Validate Solana-like full addresses and reject obvious truncation.
 7. Deduplicate by wallet; preserve alternate names in JSON `names`.
