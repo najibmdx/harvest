@@ -2,570 +2,291 @@
 /* eslint-disable no-console */
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('playwright');
+const puppeteer = require('puppeteer-core');
 
 const OUTPUT_DIR = path.resolve(process.cwd(), 'output');
-const LOG_PATH = path.join(OUTPUT_DIR, 'debug_run_log.txt');
-const DOM_SNAPSHOT_PATH = path.join(OUTPUT_DIR, 'debug_dom_snapshot.html');
-const DOM_ROWS_PATH = path.join(OUTPUT_DIR, 'debug_dom_rows.json');
-const NETWORK_CANDIDATES_PATH = path.join(OUTPUT_DIR, 'debug_network_candidates.json');
-const CSV_PATH = path.join(OUTPUT_DIR, 'padre_kols.csv');
-const JSON_PATH = path.join(OUTPUT_DIR, 'padre_kols.json');
-const SQLITE_PATH = path.join(OUTPUT_DIR, 'padre_kols.sqlite');
-const CDP_URL = 'http://127.0.0.1:9222';
+const PATHS = {
+  runLog: path.join(OUTPUT_DIR, 'debug_run_log.txt'),
+  networkCandidates: path.join(OUTPUT_DIR, 'debug_network_candidates.json'),
+  domSnapshot: path.join(OUTPUT_DIR, 'debug_dom_snapshot.html'),
+  domRows: path.join(OUTPUT_DIR, 'debug_dom_rows.json'),
+  csv: path.join(OUTPUT_DIR, 'padre_kols.csv'),
+  json: path.join(OUTPUT_DIR, 'padre_kols.json')
+};
 
-const WALLET_KEYS = ['wallet', 'walletAddress', 'address', 'owner', 'publicKey', 'pubkey', 'account', 'trader', 'kol'];
-const NAME_KEYS = ['name', 'displayName', 'username', 'handle', 'label', 'nickname', 'ownerName'];
+const FORBIDDEN_NAME_TOKENS = new Set(['copy', 'copied', 'wallet', 'address', 'open', 'view', 'edit', 'delete']);
+const BASE58_FULL_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const BASE58_FRAGMENT_RE = /[1-9A-HJ-NP-Za-km-z]{6,}/g;
 
-const BASE58_RE = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;
+function nowIso() { return new Date().toISOString(); }
+function ensureOutput() { fs.mkdirSync(OUTPUT_DIR, { recursive: true }); }
+function writeJson(file, data) { fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8'); }
 
-const nowIso = () => new Date().toISOString();
-const ensureOutput = () => fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-function ensureOutput() {
-  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+function isBase58Like(text) {
+  return typeof text === 'string' && /^[1-9A-HJ-NP-Za-km-z]+$/.test(text.trim());
 }
 
-function nowIso() {
-  return new Date().toISOString();
+function isFullWallet(text) {
+  if (typeof text !== 'string') return false;
+  const v = text.trim();
+  return BASE58_FULL_RE.test(v);
 }
 
-function createLogger() {
-  const lines = [];
-  const log = (msg) => {
-    const line = `[${nowIso()}] ${msg}`;
-    lines.push(line);
-    console.log(line);
-  };
-  const flush = () => fs.writeFileSync(LOG_PATH, `${lines.join('\n')}\n`, 'utf8');
-  return { log, flush };
+function isNumericName(v) {
+  return typeof v === 'string' && /^\d+$/.test(v.trim());
 }
 
-function isLikelySolanaAddress(v) {
+function isValidDisplayName(v) {
   if (typeof v !== 'string') return false;
-  const s = v.trim();
-  return s.length >= 32 && s.length <= 44 && !/[\s.…]/.test(s) && /^[1-9A-HJ-NP-Za-km-z]+$/.test(s);
-}
-
-function isNumericOnly(s) {
-  return typeof s === 'string' && /^\d+$/.test(s.trim());
-}
-
-function isLikelyInternalIdName(name) {
-  if (!name || typeof name !== 'string') return true;
-  const s = name.trim();
-  if (!s) return true;
-  if (isNumericOnly(s) && s.length >= 6) return true;
-  return false;
-  if (s.length < 32 || s.length > 44) return false;
-  if (/\.{2,}|…/.test(s)) return false;
-  if (/\s/.test(s)) return false;
-  if (!/^[1-9A-HJ-NP-Za-km-z]+$/.test(s)) return false;
-  if (s.length <= 8) return false;
+  const name = v.trim();
+  if (!name) return false;
+  if (isNumericName(name)) return false;
+  if (isFullWallet(name)) return false;
+  if (isBase58Like(name) && name.length >= 32) return false;
+  if (FORBIDDEN_NAME_TOKENS.has(name.toLowerCase())) return false;
   return true;
 }
 
-function isLikelyTruncated(v) {
-  if (typeof v !== 'string') return true;
-  const s = v.trim();
-  return s.length <= 8 || /\.{2,}|…/.test(s);
-}
-
-function normalizeName(v) {
-  return typeof v === 'string' ? v : (v == null ? '' : String(v));
-}
-
-function recursiveWalk(value, visitor, pathStack = []) {
-  visitor(value, pathStack);
-  if (Array.isArray(value)) value.forEach((item, i) => recursiveWalk(item, visitor, pathStack.concat(String(i))));
-  else if (value && typeof value === 'object') Object.entries(value).forEach(([k, v]) => recursiveWalk(v, visitor, pathStack.concat(k)));
-}
-
-function discoverFromJson(payload, meta) {
-  const out = [];
-  recursiveWalk(payload, (node, pth) => {
-    if (!node || typeof node !== 'object' || Array.isArray(node)) return;
-    const entries = Object.entries(node);
-    const walletHits = entries.filter(([k, v]) => WALLET_KEYS.map(x => x.toLowerCase()).includes(k.toLowerCase()) && typeof v === 'string');
-    const nameHits = entries.filter(([k, v]) => NAME_KEYS.map(x => x.toLowerCase()).includes(k.toLowerCase()) && typeof v === 'string');
-
-    for (const [walletKey, walletValue] of walletHits) {
-      const wallet = walletValue.trim();
-      out.push({
-        wallet_address: wallet,
-        name: nameHits[0] ? nameHits[0][1] : '',
-        source: 'network',
-        extracted_at: nowIso(),
-        meta: {
-          url: meta.url,
-          status: meta.status,
-          path: pth.join('.'),
-          wallet_key: walletKey,
-          name_key: nameHits[0] ? nameHits[0][0] : null,
-          full_wallet: isLikelySolanaAddress(wallet)
-        }
-      });
-    }
-  });
-  return out;
-}
-
-function fragmentMatchesWallet(fragment, wallet) {
-  if (!fragment || !wallet) return false;
-  const f = fragment.replace(/\s+/g, '').replace(/…/g, '').replace(/\./g, '');
-  if (f.length < 4) return false;
-  return wallet.startsWith(f) || wallet.includes(f);
-}
-
-function cleanCandidateName(raw, rowText) {
-  if (!raw || typeof raw !== 'string') return '';
-  let name = raw.replace(/\s+/g, ' ').trim();
-  if (!name) return '';
-  if (/^copy$/i.test(name) || /^copied!?$/i.test(name)) return '';
-  if (isLikelyInternalIdName(name)) return '';
-
-  const row = (rowText || '').replace(/\s+/g, ' ');
-  if (row) {
-    const walletTokens = row.match(BASE58_RE) || [];
-    walletTokens.forEach((w) => { if (name.includes(w)) name = name.replace(w, '').trim(); });
+function extractWalletsRecursively(value, outputSet) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (isFullWallet(trimmed)) outputSet.add(trimmed);
+    return;
   }
-
-  if (isLikelyInternalIdName(name)) return '';
-  return name;
-}
-
-function consolidate(rows) {
   if (Array.isArray(value)) {
-    value.forEach((item, idx) => recursiveWalk(item, visitor, pathStack.concat(String(idx))));
-  } else if (value && typeof value === 'object') {
-    Object.entries(value).forEach(([k, v]) => recursiveWalk(v, visitor, pathStack.concat(k)));
+    for (const item of value) extractWalletsRecursively(item, outputSet);
+    return;
   }
-}
-
-function discoverFromJson(payload, meta) {
-  const candidates = [];
-  recursiveWalk(payload, (node, pth) => {
-    if (!node || typeof node !== 'object' || Array.isArray(node)) return;
-
-    const entries = Object.entries(node);
-    const walletHits = [];
-    const nameHits = [];
-
-    for (const [k, v] of entries) {
-      const lowerK = k.toLowerCase();
-      if (WALLET_KEYS.map((x) => x.toLowerCase()).includes(lowerK) && typeof v === 'string') {
-        walletHits.push({ key: k, value: v });
-      }
-      if (NAME_KEYS.map((x) => x.toLowerCase()).includes(lowerK) && typeof v === 'string') {
-        nameHits.push({ key: k, value: v });
-      }
-    }
-
-    if (walletHits.length > 0) {
-      for (const w of walletHits) {
-        const wallet = String(w.value || '').trim();
-        const full = isLikelySolanaAddress(wallet);
-        const nameFromNode = nameHits[0] ? normalizeName(nameHits[0].value) : '';
-        let inferredName = nameFromNode;
-
-        if (!inferredName) {
-          for (const [k, v] of entries) {
-            if (typeof v === 'string' && v.trim() && !isLikelySolanaAddress(v) && !isLikelyTruncated(v)) {
-              inferredName = v;
-              break;
-            }
-          }
-        }
-
-        const score = (full ? 4 : 0) + (nameFromNode ? 2 : 0) + (WALLET_KEYS.includes(w.key) ? 1 : 0);
-        candidates.push({
-          wallet_address: wallet,
-          name: inferredName,
-          source: 'network',
-          extracted_at: nowIso(),
-          meta: {
-            url: meta.url,
-            status: meta.status,
-            path: pth.join('.'),
-            wallet_key: w.key,
-            name_key: nameHits[0] ? nameHits[0].key : null,
-            score,
-            full_wallet: full
-          }
-        });
-      }
-    }
-  });
-  return candidates;
-}
-
-function consolidateRows(rows) {
-  const byWallet = new Map();
-  for (const r of rows) {
-    if (!isLikelySolanaAddress(r.wallet_address)) continue;
-    const wallet = r.wallet_address.trim();
-    const name = r.name || '';
-    if (!byWallet.has(wallet)) {
-      byWallet.set(wallet, { name, names: name ? [name] : [], wallet_address: wallet, source: r.source, extracted_at: r.extracted_at });
-    } else if (name && !byWallet.get(wallet).names.includes(name)) {
-      byWallet.get(wallet).names.push(name);
-    }
+  if (value && typeof value === 'object') {
+    for (const val of Object.values(value)) extractWalletsRecursively(val, outputSet);
   }
-  return [...byWallet.values()].map((r) => ({ ...r, name: r.name || (r.names[0] || '') }));
 }
 
 function toCsv(rows) {
-  const esc = (v) => /[",\n]/.test(String(v ?? '')) ? `"${String(v ?? '').replace(/"/g, '""')}"` : String(v ?? '');
-  return `name,wallet_address,source,extracted_at\n${rows.map((r) => [esc(r.name), esc(r.wallet_address), esc(r.source), esc(r.extracted_at)].join(',')).join('\n')}\n`;
-    const name = normalizeName(r.name);
-    if (!byWallet.has(wallet)) {
-      byWallet.set(wallet, {
-        name,
-        names: name ? [name] : [],
-        wallet_address: wallet,
-        source: r.source,
-        extracted_at: r.extracted_at
-      });
-    } else {
-      const existing = byWallet.get(wallet);
-      if (name && !existing.names.includes(name)) existing.names.push(name);
-    }
-  }
-  return [...byWallet.values()].map((row) => ({
-    name: row.name || (row.names[0] || ''),
-    names: row.names,
-    wallet_address: row.wallet_address,
-    source: row.source,
-    extracted_at: row.extracted_at
-  }));
-}
-
-function toCsv(rows) {
-  const header = 'name,wallet_address,source,extracted_at';
   const esc = (v) => {
-    const s = v == null ? '' : String(v);
-    if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-    return s;
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  return `${header}\n${rows.map((r) => [esc(r.name), esc(r.wallet_address), esc(r.source), esc(r.extracted_at)].join(',')).join('\n')}\n`;
+  const header = 'name,wallet_address,source,extracted_at';
+  const body = rows.map((r) => [esc(r.name), esc(r.wallet_address), esc(r.source), esc(r.extracted_at)].join(','));
+  return `${header}\n${body.join('\n')}\n`;
 }
 
-function writeSqliteWithPython(rows, log) {
-  const payloadPath = path.join(OUTPUT_DIR, '.tmp_rows.json');
-  fs.writeFileSync(payloadPath, JSON.stringify(rows), 'utf8');
-  const py = [
-    'import json, sqlite3',
-    `rows=json.load(open(r"${payloadPath}","r",encoding="utf-8"))`,
-    `conn=sqlite3.connect(r"${SQLITE_PATH}")`,
-    'cur=conn.cursor()',
-    'cur.execute("DROP TABLE IF EXISTS padre_kols")',
-    'cur.execute("CREATE TABLE padre_kols (name TEXT, names TEXT, wallet_address TEXT PRIMARY KEY, source TEXT, extracted_at TEXT)")',
-    'for r in rows:',
-    '  cur.execute("INSERT OR REPLACE INTO padre_kols (name,names,wallet_address,source,extracted_at) VALUES (?,?,?,?,?)", (r.get("name",""), json.dumps(r.get("names",[]), ensure_ascii=False), r["wallet_address"], r.get("source",""), r.get("extracted_at","")))',
-    'conn.commit(); conn.close()'
-  ].join(';');
-  const { execSync } = require('child_process');
-  execSync(`python3 -c '${py.replace(/'/g, "'\\''")}'`, { stdio: 'pipe' });
-  fs.unlinkSync(payloadPath);
-  log('SQLite export completed.');
+async function getWsEndpoint() {
+  const res = await fetch('http://127.0.0.1:9222/json/version');
+  if (!res.ok) throw new Error(`Failed to fetch CDP version endpoint: HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data.webSocketDebuggerUrl) throw new Error('webSocketDebuggerUrl missing from /json/version');
+  return data.webSocketDebuggerUrl;
 }
 
-async function run() {
+async function openOrReuseTrackerPage(browser, log) {
+  const pages = await browser.pages();
+  const existing = pages.find((p) => (p.url() || '').includes('trade.padre.gg/tracker'));
+  const page = existing || await browser.newPage();
+  if (!existing) {
+    await page.goto('https://trade.padre.gg/tracker', { waitUntil: 'domcontentloaded', timeout: 120000 });
+  }
+  await page.bringToFront();
+  await page.waitForTimeout(2000);
+  log('tracker page opened');
+  return page;
+}
+
+async function openKolsManager(page, log) {
+  const buttonHandles = await page.$$('button, [role="button"], a, div, span');
+  for (const handle of buttonHandles) {
+    const text = await page.evaluate((el) => (el.textContent || '').trim(), handle);
+    if (/^kols manager$/i.test(text) || /kols manager/i.test(text)) {
+      await handle.click({ delay: 20 });
+      await page.waitForTimeout(1500);
+      log('KOLs Manager found');
+      return;
+    }
+  }
+  throw new Error('Could not locate "KOLs Manager" in visible UI. Open it manually and rerun.');
+}
+
+async function main() {
   ensureOutput();
-  const { log, flush } = createLogger();
+  const logs = [];
+  const log = (m) => {
+    const line = `[${nowIso()}] ${m}`;
+    logs.push(line);
+    console.log(line);
+  };
+
   let browser;
+  const networkWallets = new Set();
+  const networkEvidence = [];
 
   try {
-    log('Starting export flow.');
-    browser = await chromium.connectOverCDP(CDP_URL);
-    const context = browser.contexts()[0];
-    if (!context) throw new Error('No browser context found. Launch Chrome with remote debugging and log in first.');
-    log(`Connecting to Chrome over CDP at ${CDP_URL}.`);
-    browser = await chromium.connectOverCDP(CDP_URL);
+    const ws = await getWsEndpoint();
+    browser = await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null, protocolTimeout: 120000 });
+    log('connected to Chrome');
 
-    const context = browser.contexts()[0];
-    if (!context) throw new Error('No browser context found. Ensure Chrome is launched with remote debugging and has at least one profile context.');
+    const page = await openOrReuseTrackerPage(browser, log);
 
-    let page = context.pages().find((p) => p.url().includes('trade.padre.gg')) || context.pages()[0];
-    if (!page) page = await context.newPage();
-
-    const networkCandidates = [];
-    page.on('response', async (resp) => {
+    page.on('response', async (response) => {
       try {
-        if (!['fetch', 'xhr'].includes(resp.request().resourceType())) return;
-        const ct = (resp.headers()['content-type'] || '').toLowerCase();
-        if (!ct.includes('json') && !ct.includes('javascript')) return;
-        const text = await resp.text();
-        let json;
-        try { json = JSON.parse(text); } catch { return; }
-        const found = discoverFromJson(json, { url: resp.url(), status: resp.status() });
-        if (found.length) networkCandidates.push(...found);
-      } catch {}
+        const headers = response.headers();
+        const ct = headers['content-type'] || headers['Content-Type'] || '';
+        if (!ct.includes('application/json')) return;
+        const data = await response.json();
+        const walletsBefore = networkWallets.size;
+        extractWalletsRecursively(data, networkWallets);
+        const walletsAfter = networkWallets.size;
+        if (walletsAfter > walletsBefore) {
+          networkEvidence.push({
+            url: response.url(),
+            status: response.status(),
+            newly_found_count: walletsAfter - walletsBefore,
+            timestamp: nowIso()
+          });
+        }
+      } catch (_) {}
     });
 
-    await page.goto('https://trade.padre.gg/tracker', { waitUntil: 'domcontentloaded', timeout: 120000 });
-    await page.waitForTimeout(4000);
-    const tab = page.locator('text=KOLs Manager').first();
-    await tab.waitFor({ timeout: 30000 });
-    await tab.click({ timeout: 10000 });
-
-    log('Capturing network for 15 seconds.');
+    await openKolsManager(page, log);
     await page.waitForTimeout(15000);
 
-    const domHtml = await page.content();
-    fs.writeFileSync(DOM_SNAPSHOT_PATH, domHtml, 'utf8');
-    fs.writeFileSync(NETWORK_CANDIDATES_PATH, JSON.stringify(networkCandidates, null, 2), 'utf8');
+    const networkPayload = {
+      extracted_at: nowIso(),
+      wallet_count: networkWallets.size,
+      wallets: Array.from(networkWallets),
+      evidence: networkEvidence
+    };
+    writeJson(PATHS.networkCandidates, networkPayload);
+    log(`network candidates found: ${networkWallets.size}`);
 
-    const networkWallets = consolidate(networkCandidates.filter((r) => r.meta && r.meta.full_wallet));
-    const networkWalletSet = new Set(networkWallets.map((r) => r.wallet_address));
-    if (!networkWallets.length) throw new Error('No valid full wallets found in network capture.');
-    log(`Valid network wallets: ${networkWallets.length}`);
+    const html = await page.content();
+    fs.writeFileSync(PATHS.domSnapshot, html, 'utf8');
 
     const domRows = await page.evaluate(() => {
-      const base58 = /[1-9A-HJ-NP-Za-km-z]{4,44}/g;
+      const rowSelectors = ['tr', '[role="row"]', '.row', '.table-row', '[class*="row"]'];
       const rows = [];
-      const rowNodes = Array.from(document.querySelectorAll('tr, [role="row"], li, article, section > div, div'));
+      const seen = new Set();
+      for (const sel of rowSelectors) {
+        const nodes = document.querySelectorAll(sel);
+        for (const el of nodes) {
+          const rawText = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          if (!rawText || rawText.length < 6) continue;
+          if (seen.has(rawText)) continue;
+          seen.add(rawText);
 
-      for (const node of rowNodes) {
-        const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!text || text.length < 5) continue;
-        if (!/copy|wallet|kol|manager/i.test(text)) continue;
+          const tokens = rawText.split(' ').filter(Boolean);
+          const candidateName = tokens.find((t) => t && !/^\d+$/.test(t)) || '';
+          const fragments = rawText.match(/[1-9A-HJ-NP-Za-km-z]{6,}/g) || [];
+          const visibleWalletFragment = fragments.find((f) => f.length >= 6 && f.length < 32) || '';
 
-        const buttons = Array.from(node.querySelectorAll('button, [role="button"], [aria-label], [title]'));
-        const copyButton = buttons.find((b) => /copy/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '') + ' ' + (b.textContent || '')));
-        if (!copyButton) continue;
+          const clickable = Array.from(el.querySelectorAll('button,[role="button"],svg,[class*="copy"], [aria-label*="copy" i]'));
+          const copyTargetIndex = clickable.findIndex((node) => {
+            const label = `${node.getAttribute('aria-label') || ''} ${node.textContent || ''}`.toLowerCase();
+            return label.includes('copy') || label.includes('wallet');
+          });
 
-        const nameEl = node.querySelector('[data-testid*="name"], [class*="name"], a, strong, h1, h2, h3, h4, h5, span');
-        const nameText = (nameEl ? nameEl.textContent : node.textContent || '').replace(/\s+/g, ' ').trim();
-        const fragments = text.match(base58) || [];
-        const visibleWalletFragment = fragments.sort((a, b) => b.length - a.length)[0] || '';
-
-        const marker = `padre-copy-${rows.length}`;
-        copyButton.setAttribute('data-padre-copy-marker', marker);
-
-        rows.push({ row_index: rows.length, raw_text: text, candidate_name: nameText, visible_wallet_fragment: visibleWalletFragment, copy_marker: marker });
+          rows.push({ raw_text: rawText, candidate_name: candidateName, visible_wallet_fragment: visibleWalletFragment, copy_target_index: copyTargetIndex });
+        }
       }
       return rows;
     });
 
-    log(`DOM rows discovered: ${domRows.length}`);
+    const mappedRows = [];
+    const exported = [];
+    const wallets = Array.from(networkWallets);
 
-    const debugRows = [];
-    const hybridRows = [];
-
-    for (const row of domRows) {
-      let clipboardWallet = '';
-      let matchedNetworkWallet = '';
-      let matchMethod = 'none';
-
-      try {
-        const btn = page.locator(`[data-padre-copy-marker="${row.copy_marker}"]`).first();
-        if (await btn.count()) {
-          await btn.click({ timeout: 2000 });
-          await page.waitForTimeout(200);
-          clipboardWallet = await page.evaluate(async () => {
-            try { return (await navigator.clipboard.readText() || '').trim(); } catch { return ''; }
-          });
-          if (isLikelySolanaAddress(clipboardWallet)) {
-            matchedNetworkWallet = clipboardWallet;
-            matchMethod = 'clipboard';
-          }
-        }
-      } catch {}
-
-      if (!matchedNetworkWallet && row.visible_wallet_fragment) {
-        const matched = [...networkWalletSet].find((w) => fragmentMatchesWallet(row.visible_wallet_fragment, w));
-        if (matched) {
-          matchedNetworkWallet = matched;
-          matchMethod = 'fragment';
-        }
-      }
-
-      const cleanedName = cleanCandidateName(row.candidate_name, row.raw_text);
-      debugRows.push({
-        row_index: row.row_index,
-        raw_text: row.raw_text,
-        candidate_name: cleanedName,
-        visible_wallet_fragment: row.visible_wallet_fragment,
-        clipboard_wallet: clipboardWallet,
-        matched_network_wallet: matchedNetworkWallet,
-        match_method: matchMethod
-      });
-
-      if (matchedNetworkWallet) {
-        hybridRows.push({
-          name: cleanedName,
-          wallet_address: matchedNetworkWallet,
-          source: matchMethod === 'clipboard' ? 'clipboard' : 'hybrid',
-          extracted_at: nowIso()
-        });
-      } else {
-        log(`Unpaired row ${row.row_index}: could not match wallet. Name candidate='${cleanedName}'`);
-      }
-    }
-
-    fs.writeFileSync(DOM_ROWS_PATH, JSON.stringify(debugRows, null, 2), 'utf8');
-
-    const hybridByWallet = new Map(hybridRows.map((r) => [r.wallet_address, r]));
-    const finalRows = networkWallets.map((nw) => {
-      const h = hybridByWallet.get(nw.wallet_address);
-      return {
-        name: h ? h.name : '',
-        wallet_address: nw.wallet_address,
-        source: h ? h.source : 'network',
-        extracted_at: nowIso(),
-        names: h && h.name ? [h.name] : []
+    for (let i = 0; i < domRows.length; i += 1) {
+      const r = domRows[i];
+      const row = {
+        row_index: i,
+        raw_text: r.raw_text,
+        candidate_name: isValidDisplayName(r.candidate_name) ? r.candidate_name : '',
+        visible_wallet_fragment: r.visible_wallet_fragment || '',
+        clipboard_wallet: '',
+        matched_network_wallet: '',
+        match_method: 'none'
       };
-    });
 
-    const nonNumericNames = finalRows.filter((r) => r.name && !isLikelyInternalIdName(r.name));
-    if (finalRows.length && nonNumericNames.length === 0) {
-      throw new Error('Name extraction failed: all extracted names are empty or numeric/internal IDs.');
-    }
-
-    fs.writeFileSync(CSV_PATH, toCsv(finalRows), 'utf8');
-    fs.writeFileSync(JSON_PATH, JSON.stringify(finalRows, null, 2), 'utf8');
-
-    try {
-      if (!fs.existsSync(SQLITE_PATH)) {
-        fs.writeFileSync(SQLITE_PATH, '');
-      }
-      log('SQLite export skipped (optional, no Python dependency).');
-    } catch (e) {
-      log(`SQLite optional export skipped due to error: ${e.message}`);
-    }
-
-    log(`Export completed. Wallets: ${finalRows.length}. Named rows: ${nonNumericNames.length}.`);
-    flush();
-  } catch (err) {
-    log(`ERROR: ${err.message}`);
-    flush();
-    const responseHandler = async (resp) => {
-      try {
-        const req = resp.request();
-        const type = req.resourceType();
-        if (!['fetch', 'xhr'].includes(type)) return;
-
-        const ct = (resp.headers()['content-type'] || '').toLowerCase();
-        if (!ct.includes('application/json') && !ct.includes('text/json') && !ct.includes('javascript')) return;
-
-        const txt = await resp.text();
-        let parsed;
-        try { parsed = JSON.parse(txt); } catch { return; }
-        const found = discoverFromJson(parsed, { url: resp.url(), status: resp.status() });
-        if (found.length) networkCandidates.push(...found);
-      } catch {
-        // best effort
-      }
-    };
-
-    page.on('response', responseHandler);
-
-    log('Navigating to tracker page.');
-    await page.goto('https://trade.padre.gg/tracker', { waitUntil: 'domcontentloaded', timeout: 120000 });
-    await page.waitForTimeout(4000);
-
-    log('Locating KOLs Manager section/tab.');
-    const kolLocator = page.locator('text=KOLs Manager').first();
-    await kolLocator.waitFor({ timeout: 30000 });
-    await kolLocator.click({ timeout: 10000 });
-
-    log('Capturing Fetch/XHR JSON responses for 15 seconds.');
-    await page.waitForTimeout(15000);
-
-    fs.writeFileSync(NETWORK_CANDIDATES_PATH, JSON.stringify(networkCandidates, null, 2), 'utf8');
-    log(`Saved network candidates: ${networkCandidates.length}`);
-
-    let finalRows = [];
-    const confident = consolidateRows(
-      networkCandidates
-        .filter((r) => r.meta && r.meta.full_wallet)
-        .sort((a, b) => (b.meta.score || 0) - (a.meta.score || 0))
-    );
-
-    if (confident.length > 0) {
-      finalRows = confident.map((r) => ({ ...r, source: 'network' }));
-      log(`Selected extraction mode: network. Valid wallets: ${finalRows.length}`);
-    } else {
-      log('Network extraction did not find confident full wallet/name pairs. Falling back to DOM+clipboard.');
-      const html = await page.content();
-      fs.writeFileSync(DOM_SNAPSHOT_PATH, html, 'utf8');
-      log('Saved DOM snapshot.');
-
-      const domRows = await page.evaluate(async () => {
-        function findWalletText(el) {
-          const texts = [el.innerText || '', el.textContent || ''];
-          return texts.find((t) => /[1-9A-HJ-NP-Za-km-z]{32,44}/.test(t)) || '';
+      if (row.candidate_name && row.visible_wallet_fragment && row.visible_wallet_fragment.length >= 6) {
+        const match = wallets.find((w) => w.startsWith(row.visible_wallet_fragment) || w.includes(row.visible_wallet_fragment));
+        if (match) {
+          row.matched_network_wallet = match;
+          row.match_method = 'fragment';
         }
+      }
 
-        const candidates = [];
-        const blocks = Array.from(document.querySelectorAll('tr, [role="row"], li, div'));
-        for (const block of blocks) {
-          const txt = (block.textContent || '').trim();
-          if (!txt || txt.length < 4) continue;
-          if (!/kol|manager|wallet|address/i.test(document.body.innerText || '')) break;
-
-          const btn = block.querySelector('button, [role="button"]');
-          if (!btn) continue;
-          const walletVisible = findWalletText(block);
-          candidates.push({
-            name: (block.querySelector('[data-testid*="name"], .name, .username, a, span') || block).textContent?.trim() || '',
-            walletVisible,
-            hasButton: !!btn
+      if (!row.matched_network_wallet && row.candidate_name) {
+        const copied = await page.evaluate(async (rowText) => {
+          const all = Array.from(document.querySelectorAll('tr,[role="row"],.row,.table-row,[class*="row"]'));
+          const rowEl = all.find((el) => ((el.textContent || '').replace(/\s+/g, ' ').trim() === rowText));
+          if (!rowEl) return '';
+          const candidates = Array.from(rowEl.querySelectorAll('button,[role="button"],[aria-label*="copy" i],[class*="copy" i]'));
+          const target = candidates.find((el) => {
+            const label = `${el.getAttribute('aria-label') || ''} ${el.textContent || ''}`.toLowerCase();
+            return label.includes('copy') || label.includes('wallet');
           });
-        }
-        return candidates;
-      });
-
-      log(`DOM candidate rows found: ${domRows.length}`);
-
-      const copiedRows = [];
-      const copyButtons = page.locator('button:has-text("Copy"), [aria-label*="copy" i], [title*="copy" i], button >> svg');
-      const copyCount = await copyButtons.count();
-      log(`Detected potential copy buttons: ${copyCount}`);
-
-      for (let i = 0; i < copyCount; i++) {
-        try {
-          await copyButtons.nth(i).click({ timeout: 2000 });
-          await page.waitForTimeout(200);
-          const clip = await page.evaluate(async () => {
-            try { return await navigator.clipboard.readText(); } catch { return ''; }
-          });
-          if (isLikelySolanaAddress(clip)) {
-            const name = domRows[i] ? domRows[i].name : '';
-            copiedRows.push({ name, wallet_address: clip.trim(), source: 'clipboard', extracted_at: nowIso() });
+          if (!target) return '';
+          target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          if (!navigator.clipboard || !navigator.clipboard.readText) return '';
+          try {
+            return (await navigator.clipboard.readText()).trim();
+          } catch {
+            return '';
           }
-        } catch {
-          // continue
+        }, r.raw_text);
+
+        if (isFullWallet(copied)) {
+          row.clipboard_wallet = copied;
+          row.match_method = 'clipboard';
         }
       }
 
-      finalRows = consolidateRows(copiedRows);
-      if (!finalRows.length) {
-        throw new Error('Failed to extract full wallet addresses from network and DOM/clipboard.');
+      if (row.match_method === 'fragment') {
+        exported.push({ name: row.candidate_name, wallet_address: row.matched_network_wallet, source: 'network+dom', extracted_at: nowIso() });
+      } else if (row.match_method === 'clipboard') {
+        exported.push({ name: row.candidate_name, wallet_address: row.clipboard_wallet, source: 'clipboard', extracted_at: nowIso() });
       }
-      log(`Selected extraction mode: clipboard. Valid wallets: ${finalRows.length}`);
+
+      mappedRows.push(row);
     }
 
-    const csv = toCsv(finalRows);
-    fs.writeFileSync(CSV_PATH, csv, 'utf8');
-    fs.writeFileSync(JSON_PATH, JSON.stringify(finalRows, null, 2), 'utf8');
-    writeSqliteWithPython(finalRows, log);
+    writeJson(PATHS.domRows, mappedRows);
+    log(`DOM rows found: ${mappedRows.length}`);
 
-    if (!fs.existsSync(DOM_SNAPSHOT_PATH)) {
-      fs.writeFileSync(DOM_SNAPSHOT_PATH, await page.content(), 'utf8');
+    const dedup = [];
+    const seenWallet = new Set();
+    for (const item of exported) {
+      if (!isValidDisplayName(item.name)) continue;
+      if (!isFullWallet(item.wallet_address)) continue;
+      if (seenWallet.has(item.wallet_address)) continue;
+      seenWallet.add(item.wallet_address);
+      dedup.push(item);
     }
 
-    log(`Export completed. Rows exported: ${finalRows.length}`);
-    flush();
+    log(`rows paired: ${dedup.length}`);
+
+    if (dedup.length === 0) {
+      throw new Error('No confident name-wallet pairs extracted. Check debug files and ensure KOLs Manager rows are visible.');
+    }
+
+    if (dedup.every((x) => !x.name || isNumericName(x.name))) {
+      throw new Error('Extracted names are empty or numeric IDs only. Failing to prevent invalid export.');
+    }
+
+    fs.writeFileSync(PATHS.csv, toCsv(dedup), 'utf8');
+    writeJson(PATHS.json, dedup);
+    log('CSV written');
+    log('JSON written');
   } catch (err) {
-    try {
-      fs.writeFileSync(LOG_PATH, `${fs.existsSync(LOG_PATH) ? fs.readFileSync(LOG_PATH, 'utf8') : ''}[${nowIso()}] ERROR: ${err.message}\n`, 'utf8');
-    } catch {}
-    console.error(`ERROR: ${err.message}`);
-    process.exitCode = 1;
+    log(`failures: ${err.message}`);
+    throw err;
   } finally {
-    if (browser) await browser.close();
+    fs.writeFileSync(PATHS.runLog, `${logs.join('\n')}\n`, 'utf8');
+    if (browser) await browser.disconnect();
   }
 }
 
-run();
+main().catch(() => {
+  process.exitCode = 1;
+});
