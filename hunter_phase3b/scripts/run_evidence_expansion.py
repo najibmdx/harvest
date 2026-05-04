@@ -117,6 +117,38 @@ def main() -> int:
 
     direction_resolution = resolve_transfer_directions(transfers_by_wallet, wallet_addresses)
     tx_inventory = build_tx_hash_inventory(transfers_by_wallet, str(timeline_file))
+    total_hashes = sum(i["unique_tx_hash_count"] for i in tx_inventory)
+    if sum(len(v) for v in transfers_by_wallet.values()) > 0 and total_hashes == 0:
+        first_events: list[dict[str, Any]] = []
+        for wl in sorted(transfers_by_wallet.keys()):
+            for ev in transfers_by_wallet[wl]:
+                first_events.append(ev)
+                if len(first_events) >= 3:
+                    break
+            if len(first_events) >= 3:
+                break
+        p2_check = p2 / "transfer_field_preservation_check.md"
+        p2_pass = "unknown"
+        if p2_check.exists():
+            text = p2_check.read_text(encoding="utf-8", errors="ignore")
+            if "preservation_pass: yes" in text:
+                p2_pass = "yes"
+            elif "preservation_pass: no" in text:
+                p2_pass = "no"
+        lines = ["# Phase 3B Transfer Field Diagnostics", ""]
+        for i, ev in enumerate(first_events, start=1):
+            lines.append(f"## Transfer Event {i}")
+            lines.append(f"- keys: {sorted(ev.keys())}")
+            lines.append(
+                f"- tx fields: tx_hash={ev.get('tx_hash')} txHash={ev.get('txHash')} transactionHash={ev.get('transactionHash')}"
+            )
+            lines.append(
+                f"- from/to fields: from_address={ev.get('from_address')} fromAddress={ev.get('fromAddress')} to_address={ev.get('to_address')} toAddress={ev.get('toAddress')}"
+            )
+            lines.append("")
+        lines.append(f"- Phase 2 preservation check exists: {'yes' if p2_check.exists() else 'no'}")
+        lines.append(f"- Phase 2 preservation check passed: {p2_pass}")
+        (out / "phase3b_transfer_field_diagnostics.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     plan, capture_index = [], []
     allow_calls = bool(cfg.get("allow_api_calls", False) and not cfg.get("offline_only", False))
@@ -215,7 +247,7 @@ def main() -> int:
     wallets_processed = len(transfers_by_wallet)
     transfers_processed = sum(len(v) for v in transfers_by_wallet.values())
     directions_resolved = sum(d["inbound_count"] + d["outbound_count"] for d in direction_resolution)
-    tx_hashes = sum(i["unique_tx_hash_count"] for i in tx_inventory)
+    tx_hashes = total_hashes
     tx_captured = sum(1 for p in plan if p["capture_status"] == "captured")
     realized_allowed = total_confirmed_trade > 0 and total_cost_candidates > 0 and all(v != "LINKAGE_BLOCKED" for v in linkage_status)
 

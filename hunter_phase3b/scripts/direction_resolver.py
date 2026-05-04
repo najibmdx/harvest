@@ -44,8 +44,8 @@ def resolve_transfer_directions(
         resolved_events: list[dict[str, Any]] = []
 
         for ev in events:
-            from_addr = ev.get("fromAddress") or ev.get("from") or ""
-            to_addr = ev.get("toAddress") or ev.get("to") or ""
+            from_addr = ev.get("from_address") or ev.get("fromAddress") or ev.get("from") or ""
+            to_addr = ev.get("to_address") or ev.get("toAddress") or ev.get("to") or ""
             norm_from = _normalize_for_compare(from_addr, evm_mode)
             norm_to = _normalize_for_compare(to_addr, evm_mode)
 
@@ -69,7 +69,7 @@ def resolve_transfer_directions(
 
             resolved_events.append({
                 "timestamp": ev.get("timestamp"),
-                "txHash": ev.get("txHash"),
+                "txHash": ev.get("txHash") or ev.get("tx_hash") or ev.get("transactionHash"),
                 "fromAddress": from_addr,
                 "toAddress": to_addr,
                 "direction": direction,

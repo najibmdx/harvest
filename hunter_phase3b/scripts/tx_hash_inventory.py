@@ -8,7 +8,10 @@ from typing import Any
 def build_tx_hash_inventory(transfers_by_wallet: dict[str, list[dict[str, Any]]], source_file: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for wallet_label, events in sorted(transfers_by_wallet.items()):
-        hashes = [(ev.get("txHash") or "").strip() for ev in events]
+        hashes = [
+            (ev.get("tx_hash") or ev.get("txHash") or ev.get("transactionHash") or "").strip()
+            for ev in events
+        ]
         present = [h for h in hashes if h]
         counts = Counter(present)
         duplicates = sum(c - 1 for c in counts.values() if c > 1)

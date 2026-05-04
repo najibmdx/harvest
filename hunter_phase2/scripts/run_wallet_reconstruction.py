@@ -71,7 +71,7 @@ def extract_party_fields(v: Any) -> tuple[str | None, str | None, str | None]:
     if isinstance(v, str):
         return v, None, None
     if isinstance(v, dict):
-        address = v.get("address") or v.get("ownerAddress") or v.get("value")
+        address = v.get("address")
         ent = None
         lbl = None
         ae = v.get("arkhamEntity")
@@ -185,6 +185,8 @@ def main() -> None:
                     recs = payload.get("transfers") or payload.get("items") or payload.get("result") or []
                     if isinstance(data, dict):
                         recs = data.get("transfers") or data.get("items") or data.get("data") or recs
+                if isinstance(payload, dict) and isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("transfers"), list):
+                    recs = payload["data"]["transfers"]
                 if isinstance(recs, dict):
                     recs = recs.get("items") or recs.get("data") or []
                 for r in recs if isinstance(recs,list) else []:
@@ -201,7 +203,8 @@ def main() -> None:
                     elif direction=="outbound": s["outbound"] += 1
                     else: s["unknown"] += 1
                     usd = r.get("historicalUSD")
-                    if r.get("transactionHash"): s["tx_hash_available_count"] += 1
+                    tx_hash = pick(r, ["transactionHash", "txHash", "tx_hash"])
+                    if tx_hash: s["tx_hash_available_count"] += 1
                     if fa and ta: s["from_to_available_count"] += 1
                     if usd is not None:
                         s["usd_flow"].add("historicalUSD")
@@ -210,14 +213,14 @@ def main() -> None:
                     cp_entity = cp_obj[1]
                     timeline.append({
                         "wallet_label": wl, "address_redacted": ar, "event_type": "transfer", "source_category": "transfers",
-                        "timestamp": r.get("blockTimestamp"), "chain": r.get("chain"), "tx_hash": r.get("transactionHash"),
+                        "timestamp": r.get("blockTimestamp"), "chain": r.get("chain"), "tx_hash": tx_hash,
                         "token_symbol": r.get("tokenSymbol"), "token_id": r.get("tokenId"), "token_address": r.get("tokenAddress"),
                         "amount": r.get("unitValue"), "usd_value": usd, "direction": direction, "counterparty": cp,
                         "counterparty_entity": cp_entity, "from_address": fa, "to_address": ta,
                         "from_entity": from_entity, "to_entity": to_entity, "from_label": from_label, "to_label": to_label,
-                        "txHash": r.get("transactionHash"), "fromAddress": fa, "toAddress": ta, "raw_source_file": str(resolved),
-                        "evidence_quality": "high" if r.get("transactionHash") and r.get("unitValue") and r.get("blockTimestamp") else "medium",
-                        "missing_fields": [f for f, v in {"timestamp": r.get("blockTimestamp"), "amount": r.get("unitValue"), "tx_hash": r.get("transactionHash")}.items() if v is None],
+                        "txHash": tx_hash, "transactionHash": tx_hash, "fromAddress": fa, "toAddress": ta, "raw_source_file": str(resolved),
+                        "evidence_quality": "high" if tx_hash and r.get("unitValue") and r.get("blockTimestamp") else "medium",
+                        "missing_fields": [f for f, v in {"timestamp": r.get("blockTimestamp"), "amount": r.get("unitValue"), "tx_hash": tx_hash}.items() if v is None],
                     })
 
         diagnostics.append(f"- balances extraction counts: number of chains in addresses={s['address_chain_count']}, number of chains in balances={s['balance_chain_count']}, number of token rows extracted={s['balance_token_rows']}, number of identity records extracted={s['identity_records']}, number of balance_snapshot events generated={s['balance_snapshot_events']}")
@@ -267,6 +270,30 @@ def main() -> None:
     coverage_total = sum(len([e for e in timeline if e.get("wallet_label") == wl]) for wl, *_ in coverage_rows)
     transfer_discovered = sum(1 for e in shape_diagnostics if e.get("category") == "transfers")
     transfer_events = sum(1 for e in timeline if e.get("event_type") == "transfer")
+    timeline_transfer_events = [e for e in timeline if e.get("event_type") == "transfer"]
+    raw_transfer_records = sum(v.get("number_of_transfer_like_records_parsed", 0) for v in flow_summary.values())
+    raw_records_with_tx_hash = sum(v.get("tx_hash_available_count", 0) for v in flow_summary.values())
+    timeline_with_tx = sum(1 for e in timeline_transfer_events if e.get("tx_hash"))
+    timeline_with_from = sum(1 for e in timeline_transfer_events if e.get("from_address"))
+    timeline_with_to = sum(1 for e in timeline_transfer_events if e.get("to_address"))
+    preservation_pass = "yes"
+    if raw_records_with_tx_hash > 0 and timeline_with_tx == 0:
+        preservation_pass = "no"
+
+    (out_dir / "transfer_field_preservation_check.md").write_text(
+        "\n".join([
+            "# Transfer Field Preservation Check",
+            "",
+            f"- raw transfer records found: {raw_transfer_records}",
+            f"- raw records with transactionHash: {raw_records_with_tx_hash}",
+            f"- timeline transfer events generated: {len(timeline_transfer_events)}",
+            f"- timeline transfer events with tx_hash: {timeline_with_tx}",
+            f"- timeline transfer events with from_address: {timeline_with_from}",
+            f"- timeline transfer events with to_address: {timeline_with_to}",
+            f"- preservation_pass: {preservation_pass}",
+        ]),
+        encoding="utf-8",
+    )
     balance_rows = sum(1 for e in timeline if e.get("event_type") == "balance_snapshot")
     identity_count = sum(1 for v in identity_summary.values() if v.get("arkham_entity_evidence"))
     pass_flag = "yes" if coverage_total == len(timeline) else "no"
@@ -282,6 +309,7 @@ def main() -> None:
             f"- transfer events with tx_hash: {sum(1 for e in timeline if e.get('event_type')=='transfer' and e.get('tx_hash'))}",
             f"- transfer events with from_address: {sum(1 for e in timeline if e.get('event_type')=='transfer' and e.get('from_address'))}",
             f"- transfer events with to_address: {sum(1 for e in timeline if e.get('event_type')=='transfer' and e.get('to_address'))}",
+            f"- transfer_field_preservation_pass: {preservation_pass}",
             f"- inbound/outbound/unknown direction counts: {sum(v['inbound_count'] for v in flow_summary.values())}/{sum(v['outbound_count'] for v in flow_summary.values())}/{sum(v['unknown_direction_count'] for v in flow_summary.values())}",
             f"- phase2 recommendation verdict: {verdict}",
             f"- consistency_pass: {pass_flag}",
