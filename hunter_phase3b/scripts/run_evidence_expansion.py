@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +13,20 @@ try:
     from hunter_phase1.scripts.arkham_client import build_headers, get_json, load_env
 except Exception:
     build_headers = get_json = load_env = None
+
+
+DEFAULT_CONFIG: dict[str, Any] = {
+    "phase2_output_dir": "hunter_phase2/output",
+    "phase3a_output_dir": "hunter_phase3a/output",
+    "wallet_input_candidates": ["config/wallet_inputs.json", "hunter_phase1/config/wallet_inputs.json"],
+    "offline_only": False,
+    "allow_api_calls": False,
+    "allowed_online_endpoint_families": ["/tx/{hash}"],
+    "max_tx_hashes_per_wallet": 100,
+    "strict_no_pnl": True,
+    "strict_no_profitability_labels": True,
+    "strict_no_external_price_api": True,
+}
 
 
 def load_json(path: Path) -> Any:
@@ -29,21 +42,60 @@ def load_timeline(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def resolve_repo_root(script_path: Path, cwd: Path) -> Path:
+    if (cwd / "hunter_phase3b").exists() or (cwd / "scripts").exists():
+        return cwd
+    if script_path.parent.name == "scripts":
+        return script_path.parents[1]
+    return script_path.parents[2]
+
+
 def main() -> int:
-    root = Path(__file__).resolve().parents[2]
+    script_path = Path(__file__).resolve()
+    cwd = Path.cwd().resolve()
+    root = resolve_repo_root(script_path, cwd)
     phase_root = root / "hunter_phase3b"
     out = phase_root / "output"
     raw_tx = out / "raw_tx_details"
     out.mkdir(parents=True, exist_ok=True)
     raw_tx.mkdir(parents=True, exist_ok=True)
 
-    cfg = load_json(phase_root / "config" / "phase3b_config.example.json")
+    cfg_attempts = [phase_root / "config" / "phase3b_config.json", phase_root / "config" / "phase3b_config.example.json"]
+    selected_config_path = next((p for p in cfg_attempts if p.exists()), None)
+    cfg = dict(DEFAULT_CONFIG)
+    if selected_config_path:
+        cfg.update(load_json(selected_config_path))
+
     p2 = root / cfg["phase2_output_dir"]
     p3a = root / cfg["phase3a_output_dir"]
-
     timeline_file = p2 / "wallet_activity_timeline.jsonl"
     phase2_required = [timeline_file, p2 / "wallet_flow_summary.json", p2 / "wallet_identity_summary.json", p2 / "phase2_consistency_check.md"]
     phase3a_required = [p3a / "pnl_mode_eligibility.json", p3a / "pnl_input_requirements.json", p3a / "phase3a_design_constraints.md"]
+
+    diag_lines = [
+        "# Phase 3B Input Diagnostics",
+        "",
+        f"- script path: {script_path}",
+        f"- current working directory: {cwd}",
+        f"- resolved repo root: {root}",
+        f"- resolved phase3b root: {phase_root}",
+        "- config paths attempted:",
+    ]
+    for p in cfg_attempts:
+        diag_lines.append(f"  - {p}")
+    diag_lines.extend([
+        f"- selected config path: {selected_config_path if selected_config_path else 'in-memory-default'}",
+        f"- whether config exists: {'yes' if selected_config_path else 'no'}",
+        f"- phase2 output dir resolved: {p2}",
+        f"- phase3a output dir resolved: {p3a}",
+        "- required Phase 2 files:",
+    ])
+    for p in phase2_required:
+        diag_lines.append(f"  - {'yes' if p.exists() else 'no'} :: {p}")
+    diag_lines.append("- required Phase 3A files:")
+    for p in phase3a_required:
+        diag_lines.append(f"  - {'yes' if p.exists() else 'no'} :: {p}")
+    (out / "phase3b_input_diagnostics.md").write_text("\n".join(diag_lines) + "\n")
 
     wallet_addresses: dict[str, str] = {}
     for candidate in cfg["wallet_input_candidates"]:
@@ -57,14 +109,11 @@ def main() -> int:
 
     rows = load_timeline(timeline_file) if timeline_file.exists() else []
     transfers_by_wallet: dict[str, list[dict[str, Any]]] = {}
-    balance_count = 0
     for r in rows:
         wl = r.get("wallet_label", "unknown_wallet")
         evt = (r.get("event_type") or "").lower()
         if evt == "transfer":
             transfers_by_wallet.setdefault(wl, []).append(r)
-        if evt == "balance_snapshot":
-            balance_count += 1
 
     direction_resolution = resolve_transfer_directions(transfers_by_wallet, wallet_addresses)
     tx_inventory = build_tx_hash_inventory(transfers_by_wallet, str(timeline_file))
@@ -77,7 +126,6 @@ def main() -> int:
         headers, _ = build_headers(env.get("auth_mode", "api-key") or "api-key", env.get("api_key", ""))
 
     tx_detail_map: dict[tuple[str, str], dict[str, Any]] = {}
-
     for inv in tx_inventory:
         wl = inv["wallet_label"]
         for txh in inv["tx_hashes"][: int(cfg.get("max_tx_hashes_per_wallet", 100))]:
@@ -110,64 +158,76 @@ def main() -> int:
             plan.append(rec)
             capture_index.append(idx)
 
-    # classify
-    trade_lines=[]; cost_lines=[]; link_lines=[]; fee_lines=[]
+    trade_lines, cost_lines, link_lines, fee_lines = [], [], [], []
     total_confirmed_trade = 0
     total_cost_candidates = 0
     linkage_status = []
     for d in direction_resolution:
-        wl=d['wallet_label']; events=transfers_by_wallet.get(wl,[])
-        cex_count=0; transfer_only=0; unknown=d['unknown_direction_count']
-        directions={e['txHash']:e['direction'] for e in d['resolved_transfer_events'] if e.get('txHash')}
-        confirmed=0; cost_candidates=0; fee_found=False; fee_fields=set();
+        wl = d["wallet_label"]
+        events = transfers_by_wallet.get(wl, [])
+        cex_count = 0
+        transfer_only = 0
+        unknown = d["unknown_direction_count"]
+        directions = {e["txHash"]: e["direction"] for e in d["resolved_transfer_events"] if e.get("txHash")}
+        confirmed = 0
+        cost_candidates = 0
+        fee_found = False
+        fee_fields = set()
         for ev in events:
-            cl=classify_transfer_event(ev)
-            if cl=="CEX_FLOW_ONLY": cex_count+=1
-            else: transfer_only+=1
-            txh=(ev.get('txHash') or '').strip()
-            detail=tx_detail_map.get((wl,txh),{})
-            if detail and tx_has_trade_side(detail): confirmed+=1
-            if cost_basis_candidate_possible(directions.get(txh,'unknown'), detail): cost_candidates+=1
-            ff,fields=tx_has_fee_gas(detail)
-            fee_found=fee_found or ff
+            cl = classify_transfer_event(ev)
+            if cl == "CEX_FLOW_ONLY":
+                cex_count += 1
+            else:
+                transfer_only += 1
+            txh = (ev.get("txHash") or "").strip()
+            detail = tx_detail_map.get((wl, txh), {})
+            if detail and tx_has_trade_side(detail):
+                confirmed += 1
+            if cost_basis_candidate_possible(directions.get(txh, "unknown"), detail):
+                cost_candidates += 1
+            ff, fields = tx_has_fee_gas(detail)
+            fee_found = fee_found or ff
             fee_fields.update(fields)
+
         total_confirmed_trade += confirmed
         total_cost_candidates += cost_candidates
         verdict = "LINKAGE_BLOCKED"
-        if confirmed>0 and cost_candidates>0: verdict = "LINKAGE_PARTIAL"
-        if confirmed>0 and cost_candidates>=confirmed and unknown==0: verdict = "LINKAGE_CONFIRMED"
+        if confirmed > 0 and cost_candidates > 0:
+            verdict = "LINKAGE_PARTIAL"
+        if confirmed > 0 and cost_candidates >= confirmed and unknown == 0:
+            verdict = "LINKAGE_CONFIRMED"
         linkage_status.append(verdict)
+
         trade_lines.append(f"## {wl}\n- transfer events parsed: {len(events)}\n- direction resolution counts: inbound={d['inbound_count']}, outbound={d['outbound_count']}, unknown={unknown}\n- transaction detail capture status: captured={sum(1 for p in plan if p['wallet_label']==wl and p['capture_status']=='captured')} failed={sum(1 for p in plan if p['wallet_label']==wl and p['capture_status']=='failed')} skipped={sum(1 for p in plan if p['wallet_label']==wl and p['capture_status']=='skipped')}\n- confirmed trade-side evidence found: {'yes' if confirmed>0 else 'no'}\n- transfer-only evidence count: {transfer_only}\n- CEX-flow-only evidence count: {cex_count}\n- unknown-direction count: {unknown}\n- realized trade side status: {'unblocked' if confirmed>0 else 'blocked; no direct trade-side fields in tx detail'}\n")
         cost_lines.append(f"## {wl}\n- cost basis available: {'yes' if cost_candidates>0 else 'no'}\n- cost basis candidate records count: {cost_candidates}\n- required fields found: token/amount/timestamp/tx/value_or_price only when direct tx evidence present\n- required fields missing: deterministic acquisition/disposal linkage where candidate count is 0\n- whether historicalUSD was present: {'yes' if any('historicalUSD' in str(e) for e in events) else 'no'}\n- historicalUSD is not cost basis unless linked to confirmed acquisition/disposal methodology.\n")
         link_lines.append(f"## {wl}\n- confirmed acquisitions found count: {cost_candidates}\n- confirmed disposals found count: {confirmed}\n- transfer-only inbound count: {d['inbound_count']}\n- transfer-only outbound count: {d['outbound_count']}\n- unknown-direction transfer count: {unknown}\n- linkage verdict: {verdict}\n")
         fee_lines.append(f"## {wl}\n- fee/gas fields found: {'yes' if fee_found else 'no'}\n- fee/gas source fields: {sorted(fee_fields) if fee_fields else []}\n- whether fee/gas can be included later: {'yes' if fee_found else 'unknown'}\n- whether fee/gas must be excluded if PnL prototype proceeds: {'no' if fee_found else 'yes'}\n- methodology blocker: {'no' if fee_found else 'yes'}\n")
 
-    (out/"transfer_direction_resolution.json").write_text(json.dumps(direction_resolution, indent=2))
-    (out/"transaction_hash_inventory.json").write_text(json.dumps(tx_inventory, indent=2))
-    (out/"tx_detail_request_plan.json").write_text(json.dumps(plan, indent=2))
-    (out/"tx_detail_capture_index.json").write_text(json.dumps(capture_index, indent=2))
-    (out/"trade_side_evidence_report.md").write_text("\n".join(trade_lines))
-    (out/"cost_basis_evidence_report.md").write_text("\n".join(cost_lines))
-    (out/"acquisition_disposal_linkage_report.md").write_text("\n".join(link_lines))
-    (out/"fee_gas_methodology_report.md").write_text("\n".join(fee_lines))
+    (out / "transfer_direction_resolution.json").write_text(json.dumps(direction_resolution, indent=2))
+    (out / "transaction_hash_inventory.json").write_text(json.dumps(tx_inventory, indent=2))
+    (out / "tx_detail_request_plan.json").write_text(json.dumps(plan, indent=2))
+    (out / "tx_detail_capture_index.json").write_text(json.dumps(capture_index, indent=2))
+    (out / "trade_side_evidence_report.md").write_text("\n".join(trade_lines))
+    (out / "cost_basis_evidence_report.md").write_text("\n".join(cost_lines))
+    (out / "acquisition_disposal_linkage_report.md").write_text("\n".join(link_lines))
+    (out / "fee_gas_methodology_report.md").write_text("\n".join(fee_lines))
 
-    wallets_processed=len(transfers_by_wallet)
-    transfers_processed=sum(len(v) for v in transfers_by_wallet.values())
-    directions_resolved=sum(d['inbound_count']+d['outbound_count'] for d in direction_resolution)
-    tx_hashes=sum(i['unique_tx_hash_count'] for i in tx_inventory)
-    tx_captured=sum(1 for p in plan if p['capture_status']=='captured')
-    realized_allowed = total_confirmed_trade>0 and total_cost_candidates>0 and all(v!="LINKAGE_BLOCKED" for v in linkage_status)
-    phase3b_report=f"# Phase 3B Evidence Expansion Report\n\n- wallets processed: {wallets_processed}\n- transfer events processed: {transfers_processed}\n- directions resolved: {directions_resolved}\n- tx hashes found: {tx_hashes}\n- tx details captured: {tx_captured}\n- confirmed trade-side evidence found: {total_confirmed_trade}\n- cost-basis evidence found: {total_cost_candidates}\n- acquisition/disposal linkage status: {', '.join(linkage_status) if linkage_status else 'none'}\n- remaining blockers: deterministic trade-side and cost-basis gaps remain unless directly evidenced\n\n## allowed next modes\n- exposure-only: allowed\n- flow-only: allowed\n- realized PnL limited design: {'allowed' if wallets_processed>0 else 'blocked'}\n- realized PnL computation: {'allowed' if realized_allowed else 'blocked'}\n"
-    (out/"phase3b_evidence_expansion_report.md").write_text(phase3b_report)
+    wallets_processed = len(transfers_by_wallet)
+    transfers_processed = sum(len(v) for v in transfers_by_wallet.values())
+    directions_resolved = sum(d["inbound_count"] + d["outbound_count"] for d in direction_resolution)
+    tx_hashes = sum(i["unique_tx_hash_count"] for i in tx_inventory)
+    tx_captured = sum(1 for p in plan if p["capture_status"] == "captured")
+    realized_allowed = total_confirmed_trade > 0 and total_cost_candidates > 0 and all(v != "LINKAGE_BLOCKED" for v in linkage_status)
 
-    phase2_found=all(f.exists() for f in phase2_required)
-    phase3a_found=all(f.exists() for f in phase3a_required)
-    direction_align = all((d['inbound_count']+d['outbound_count']+d['unknown_direction_count'])==d['transfer_events_seen'] for d in direction_resolution)
-    cost_class_exists=(out/"cost_basis_evidence_report.md").exists()
-    pnl_generated="no"; profit_labels="no"
-    consistency_pass = not realized_allowed and direction_align and pnl_generated=="no" and profit_labels=="no"
-    consistency=f"# Phase 3B Consistency Check\n\n- Phase 2 files found: {'yes' if phase2_found else 'no'}\n- Phase 3A files found: {'yes' if phase3a_found else 'no'}\n- wallet count: {wallets_processed}\n- transfer event count: {transfers_processed}\n- tx hash count: {tx_hashes}\n- tx detail capture attempted: {'yes' if any(i['attempted'] for i in capture_index) else 'no'}\n- PnL numbers generated: no\n- profitability labels generated: no\n- realized PnL allowed: {'yes' if realized_allowed else 'no'}\n- direction counts align: {'yes' if direction_align else 'no'}\n- cost basis classification exists: {'yes' if cost_class_exists else 'no'}\n- consistency_pass: {'yes' if consistency_pass else 'no'}\n"
-    (out/"phase3b_consistency_check.md").write_text(consistency)
+    phase3b_report = f"# Phase 3B Evidence Expansion Report\n\n- wallets processed: {wallets_processed}\n- transfer events processed: {transfers_processed}\n- directions resolved: {directions_resolved}\n- tx hashes found: {tx_hashes}\n- tx details captured: {tx_captured}\n- confirmed trade-side evidence found: {total_confirmed_trade}\n- cost-basis evidence found: {total_cost_candidates}\n- acquisition/disposal linkage status: {', '.join(linkage_status) if linkage_status else 'none'}\n- remaining blockers: deterministic trade-side and cost-basis gaps remain unless directly evidenced\n\n## allowed next modes\n- exposure-only: allowed\n- flow-only: allowed\n- realized PnL limited design: {'allowed' if wallets_processed > 0 else 'blocked'}\n- realized PnL computation: {'allowed' if realized_allowed else 'blocked'}\n"
+    (out / "phase3b_evidence_expansion_report.md").write_text(phase3b_report)
+
+    phase2_found = all(f.exists() for f in phase2_required)
+    phase3a_found = all(f.exists() for f in phase3a_required)
+    direction_align = all((d["inbound_count"] + d["outbound_count"] + d["unknown_direction_count"]) == d["transfer_events_seen"] for d in direction_resolution)
+    consistency_pass = (not realized_allowed) and direction_align
+    consistency = f"# Phase 3B Consistency Check\n\n- Phase 2 files found: {'yes' if phase2_found else 'no'}\n- Phase 3A files found: {'yes' if phase3a_found else 'no'}\n- wallet count: {wallets_processed}\n- transfer event count: {transfers_processed}\n- tx hash count: {tx_hashes}\n- tx detail capture attempted: {'yes' if any(i['attempted'] for i in capture_index) else 'no'}\n- PnL numbers generated: no\n- profitability labels generated: no\n- realized PnL allowed: {'yes' if realized_allowed else 'no'}\n- direction counts align: {'yes' if direction_align else 'no'}\n- cost basis classification exists: {'yes' if (out/'cost_basis_evidence_report.md').exists() else 'no'}\n- consistency_pass: {'yes' if consistency_pass else 'no'}\n"
+    (out / "phase3b_consistency_check.md").write_text(consistency)
 
     verdict = "B" if phase2_found and phase3a_found else "C"
     rec = f"# Phase 3B Recommendation\n\nVerdict: {verdict}) "
@@ -176,8 +236,14 @@ def main() -> int:
         "B": "Phase 3B evidence expansion improved coverage but realized PnL remains blocked",
         "C": "Phase 3B evidence expansion is insufficient due to missing inputs or failed capture",
     }[verdict]
-    rec += "\n\nSafe next step: " + ("Proceed to Phase 3C limited PnL prototype design" if verdict=="B" else "Fix Phase 3B evidence extraction first") + "\n"
-    (out/"phase3b_recommendation.md").write_text(rec)
+    rec += "\n\nSafe next step: " + ("Proceed to Phase 3C limited PnL prototype design" if verdict == "B" else "Fix Phase 3B evidence extraction first") + "\n"
+    (out / "phase3b_recommendation.md").write_text(rec)
+
+    if not phase2_found or not phase3a_found:
+        print("[Phase3B] Missing required inputs. Paths checked:")
+        for p in phase2_required + phase3a_required:
+            print(f" - {'FOUND' if p.exists() else 'MISSING'}: {p}")
+
     return 0
 
 
