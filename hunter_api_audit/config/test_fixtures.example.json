@@ -1,0 +1,30 @@
+{
+  "addresses": {
+    "evm": "",
+    "btc": "",
+    "solana": ""
+  },
+  "entities": {
+    "exchange": "",
+    "fund": "",
+    "project": ""
+  },
+  "tokens": {
+    "pricing_id": "",
+    "evm_chain": "",
+    "evm_token_address": "",
+    "solana_token_address": ""
+  },
+  "transactions": {
+    "evm_hash": "",
+    "btc_hash": "",
+    "solana_hash": ""
+  },
+  "tags": {
+    "tag_id": ""
+  },
+  "query_params": {
+    "limit": 10,
+    "offset": 0
+  }
+}

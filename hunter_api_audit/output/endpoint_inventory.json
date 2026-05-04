@@ -1,0 +1,16 @@
+[
+  {
+    "name": "UNKNOWN",
+    "method": "UNKNOWN",
+    "path": "UNKNOWN",
+    "purpose": "UNKNOWN",
+    "tested": false,
+    "status": "UNKNOWN",
+    "notes": [
+      "Audit has not been executed in this environment."
+    ],
+    "unknowns": [
+      "No endpoint inventory source available"
+    ]
+  }
+]
