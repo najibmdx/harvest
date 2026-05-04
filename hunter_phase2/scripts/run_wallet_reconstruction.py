@@ -65,6 +65,14 @@ def find_balance_payload(parsed: Dict[str, Any], payload: Any) -> Dict[str, Any]
     return {}
 
 
+def extract_addr_value(v: Any) -> str | None:
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict):
+        return v.get("address") or v.get("ownerAddress") or v.get("value")
+    return None
+
+
 def main() -> None:
     script_path = Path(__file__).resolve()
     repo_root, phase2_dir = resolve_project_paths(script_path)
@@ -158,30 +166,61 @@ def main() -> None:
                         s["balance_snapshot_events"] += 1
 
             if cat == "transfers":
-                recs = payload if isinstance(payload,list) else payload.get("transfers") or payload.get("items") or payload.get("data") or payload.get("result") or []
-                if isinstance(recs, dict): recs = recs.get("items") or recs.get("data") or []
+                recs = []
+                if isinstance(payload, list):
+                    recs = payload
+                elif isinstance(payload, dict):
+                    data = payload.get("data")
+                    recs = payload.get("transfers") or payload.get("items") or payload.get("result") or []
+                    if isinstance(data, dict):
+                        recs = data.get("transfers") or data.get("items") or data.get("data") or recs
+                if isinstance(recs, dict):
+                    recs = recs.get("items") or recs.get("data") or []
                 for r in recs if isinstance(recs,list) else []:
                     if not isinstance(r,dict): continue
                     s["transfer_like"] += 1; s["transfer_events"] += 1
-                    fa, ta = pick(r,["fromAddress","from"]), pick(r,["toAddress","to"]); direction = r.get("direction")
+                    fa_raw, ta_raw = pick(r,["fromAddress","from"]), pick(r,["toAddress","to"])
+                    fa, ta = extract_addr_value(fa_raw), extract_addr_value(ta_raw)
+                    direction = None
                     if direction is None and wa:
                         if fa and str(fa).lower()==str(wa).lower(): direction="outbound"
                         elif ta and str(ta).lower()==str(wa).lower(): direction="inbound"
                     if direction=="inbound": s["inbound"] += 1
                     elif direction=="outbound": s["outbound"] += 1
                     else: s["unknown"] += 1
+                    usd = r.get("historicalUSD")
+                    if usd is not None:
+                        s["usd_flow"].add("historicalUSD")
+                    cp = ta if direction == "outbound" else (fa if direction == "inbound" else None)
+                    cp_obj = ta_raw if direction == "outbound" else (fa_raw if direction == "inbound" else None)
+                    cp_entity = None
+                    if isinstance(cp_obj, dict):
+                        ae = cp_obj.get("arkhamEntity") or {}
+                        pe = cp_obj.get("predictedEntity") or {}
+                        cp_entity = ae.get("name") or pe.get("name")
+                    timeline.append({
+                        "wallet_label": wl, "address_redacted": ar, "event_type": "transfer", "source_category": "transfers",
+                        "timestamp": r.get("blockTimestamp"), "chain": r.get("chain"), "tx_hash": r.get("transactionHash"),
+                        "token_symbol": r.get("tokenSymbol"), "token_id": r.get("tokenId"), "token_address": r.get("tokenAddress"),
+                        "amount": r.get("unitValue"), "usd_value": usd, "direction": direction, "counterparty": cp,
+                        "counterparty_entity": cp_entity, "raw_source_file": str(resolved),
+                        "evidence_quality": "high" if r.get("transactionHash") and r.get("unitValue") and r.get("blockTimestamp") else "medium",
+                        "missing_fields": [f for f, v in {"timestamp": r.get("blockTimestamp"), "amount": r.get("unitValue"), "tx_hash": r.get("transactionHash")}.items() if v is None],
+                    })
 
         diagnostics.append(f"- balances extraction counts: number of chains in addresses={s['address_chain_count']}, number of chains in balances={s['balance_chain_count']}, number of token rows extracted={s['balance_token_rows']}, number of identity records extracted={s['identity_records']}, number of balance_snapshot events generated={s['balance_snapshot_events']}")
         exposure_summary[wl] = {"tokens_observed":sorted(s["tokens"]),"chains_observed":sorted(s["chains"]),"total_usd_balance_by_chain":s["usd_chain"],"top_token_exposures_by_usd":dict(sorted(s["top_token"].items(), key=lambda x:x[1], reverse=True)[:10]),"quote_time_coverage":sorted(s["quote_times"]),"missing_balance_fields":sorted(s["missing_balance_fields"])}
         identity_summary[wl] = {"arkham_entity_evidence":bool(s["entity_name"] or s["entity_id"]),"arkham_label_evidence":bool(s["label_name"]),"entity_name":s["entity_name"],"entity_id":s["entity_id"],"entity_type":s["entity_type"],"cex_identification_evidence":str(s["entity_type"] or "").lower()=="cex","chains_with_identity_evidence":sorted(s["identity_chains"]),"missing_identity_evidence":[k for k,v in {"entity_name":s["entity_name"],"entity_id":s["entity_id"],"entity_type":s["entity_type"],"label_name":s["label_name"]}.items() if not v]}
         flow_summary[wl] = {"flow_evidence_found":"flow" in available,"transfer_evidence_found":"transfers" in available,"number_of_transfer_like_records_parsed":s["transfer_like"],"inbound_count":s["inbound"],"outbound_count":s["outbound"],"unknown_direction_count":s["unknown"],"usd_flow_fields":sorted(s["usd_flow"]),"missing_flow_fields":sorted(s["missing_flow_fields"])}
         counterparty_summary[wl] = {"counterparty_evidence_found":"counterparties" in available,"known_counterparties":sorted(s["known_cp"]),"arkham_entity_counterparties":sorted(s["entity_cp"]),"cex_counterparties":sorted(s["cex_cp"]),"unknown_counterparties":s["unknown_cp"],"missing_fields":sorted(s["cp_missing"])}
-        has_amounts = s["balance_token_rows"] > 0; has_prices = bool(exposure_summary[wl]["top_token_exposures_by_usd"]); has_timestamps = bool(exposure_summary[wl]["quote_time_coverage"])
+        transfer_events = [e for e in timeline if e.get("wallet_label") == wl and e.get("event_type") == "transfer"]
+        has_amounts = s["balance_token_rows"] > 0 or any(e.get("amount") is not None for e in transfer_events)
+        has_prices = bool(exposure_summary[wl]["top_token_exposures_by_usd"]) or any(e.get("usd_value") is not None for e in transfer_events)
+        has_timestamps = bool(exposure_summary[wl]["quote_time_coverage"]) or any(e.get("timestamp") is not None for e in transfer_events)
         has_transfers = s["transfer_events"] > 0; has_direction = s["inbound"] > 0 or s["outbound"] > 0
-        missing_fields = [x for x, ok in {"transfers":has_transfers,"token amounts":has_amounts,"token prices":has_prices,"timestamps":has_timestamps,"trade direction":has_direction,"cost basis":False,"disposal/sell evidence":False}.items() if not ok]
+        missing_fields = [x for x, ok in {"transfers":has_transfers,"token amounts":has_amounts,"token prices":has_prices,"timestamps":has_timestamps,"trade direction":False,"cost basis":False}.items() if not ok]
         verdict = "PARTIALLY_FEASIBLE_WITH_MORE_DATA" if has_amounts and has_prices and has_timestamps else "NOT_FEASIBLE_YET"
-        if has_transfers and has_direction and has_timestamps: verdict = "FEASIBLE_FOR_LIMITED_RECONSTRUCTION"
-        pnl_rows.append((wl,"no","partial" if has_amounts and has_prices and has_timestamps else "no",has_transfers,has_amounts,has_prices,has_timestamps,has_direction,False,False,missing_fields,verdict))
+        pnl_rows.append((wl,"no","partial" if has_amounts and has_prices and has_timestamps else "no",has_transfers,has_amounts,has_prices,has_timestamps,False,False,("partial" if s["outbound"] > 0 else "no"),missing_fields,verdict))
         coverage_rows.append((wl, available, missing, len([e for e in timeline if e["wallet_label"]==wl]), "yes" if s["balances_parsed"] else "no"))
 
     (out_dir / "phase2_input_diagnostics.md").write_text("\n".join(diagnostics)+"\n", encoding="utf-8")
@@ -202,14 +241,16 @@ def main() -> None:
         l,real,unr,t,a,p,ts,d,cb,disp,miss,v=r
         pnl_md += [f"## {l}",f"- Can realized PnL be computed now? {real}",f"- Can unrealized exposure be estimated now? {unr}","- Required evidence available:",f"  - transfers: {'yes' if t else 'no'}",f"  - token amounts: {'yes' if a else 'no'}",f"  - token prices: {'yes' if p else 'no'}",f"  - timestamps: {'yes' if ts else 'no'}",f"  - trade direction: {'yes' if d else 'no'}",f"  - cost basis: {'yes' if cb else 'no'}",f"  - disposal/sell evidence: {'yes' if disp else 'no'}",f"- Missing evidence: {', '.join(miss) if miss else 'none'}",f"- Verdict: {v}",""]
     (out_dir / "pnl_feasibility_report.md").write_text("\n".join(pnl_md), encoding="utf-8")
-    has_transfer = any(x[-1]=="FEASIBLE_FOR_LIMITED_RECONSTRUCTION" for x in pnl_rows)
+    has_transfer = any(x[3] for x in pnl_rows)
     has_bal_snap = any(e.get("event_type")=="balance_snapshot" for e in timeline)
-    verdict = "A" if has_transfer else ("B" if has_bal_snap else "C")
-    next_step = "Proceed to Phase 3A: PnL Reconstruction Design" if verdict=="A" else ("Expand Phase 1 evidence capture with additional transfer/trade/history coverage" if verdict=="B" else "Fix parsing/reconstruction coverage first")
+    verdict = "B" if (has_bal_snap and has_transfer) else ("B" if has_bal_snap else "C")
+    next_step = "Proceed to Phase 3A: PnL Reconstruction Design Constraints" if verdict=="B" else "Fix parsing/reconstruction coverage first"
     title = {"A":"Phase 2 reconstruction is sufficient to proceed to limited PnL reconstruction design","B":"Phase 2 reconstruction is partially sufficient but needs more evidence coverage","C":"Phase 2 reconstruction is insufficient"}[verdict]
     extra = "Raw samples loaded, but no token/balance rows were discoverable. See hunter_phase2/output/raw_sample_shape_diagnostics.json." if verdict == "C" else ""
     (out_dir / "phase2_recommendation.md").write_text(f"# {verdict}) {title}\n\n- Evidence summary: Wallets processed: {len(coverage_rows)}. Timeline events: {len(timeline)}.\n- Main blockers: cost basis and disposal evidence gaps.\n- Safe next step: {next_step}\n- {extra}\n", encoding="utf-8")
     coverage_total = sum(len([e for e in timeline if e.get("wallet_label") == wl]) for wl, *_ in coverage_rows)
+    transfer_discovered = sum(1 for e in shape_diagnostics if e.get("category") == "transfers")
+    transfer_events = sum(1 for e in timeline if e.get("event_type") == "transfer")
     balance_rows = sum(1 for e in timeline if e.get("event_type") == "balance_snapshot")
     identity_count = sum(1 for v in identity_summary.values() if v.get("arkham_entity_evidence"))
     pass_flag = "yes" if coverage_total == len(timeline) else "no"
@@ -220,6 +261,9 @@ def main() -> None:
             f"- timeline event count used in reconstruction_coverage_report.md: {coverage_total}",
             f"- balance token row count: {balance_rows}",
             f"- identity record count: {identity_count}",
+            f"- transfer records discovered: {transfer_discovered}",
+            f"- transfer events generated: {transfer_events}",
+            f"- inbound/outbound/unknown direction counts: {sum(v['inbound_count'] for v in flow_summary.values())}/{sum(v['outbound_count'] for v in flow_summary.values())}/{sum(v['unknown_direction_count'] for v in flow_summary.values())}",
             f"- phase2 recommendation verdict: {verdict}",
             f"- consistency_pass: {pass_flag}",
         ]),
