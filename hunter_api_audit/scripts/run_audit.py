@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -64,6 +66,50 @@ def load_docs(url: str | None) -> tuple[dict[str, Any] | None, str]:
         return None, "Docs/spec response is not JSON; automatic endpoint discovery unavailable"
 
     return data, "Docs/spec loaded"
+
+
+def load_docs_raw(url: str | None) -> tuple[str | None, str, str | None]:
+    if not url:
+        return None, "ARKHAM_DOCS_URL not provided", None
+    try:
+        resp = requests.get(url, timeout=20)
+    except Exception as exc:
+        return None, f"Failed to fetch docs page: {type(exc).__name__}", None
+    ctype = resp.headers.get("content-type", "")
+    return resp.text, f"Docs page HTTP {resp.status_code}", ctype
+
+
+def extract_endpoints_from_html(html: str, docs_url: str) -> tuple[list[dict[str, Any]], list[str]]:
+    found: dict[tuple[str, str], dict[str, Any]] = {}
+    spec_links: list[str] = []
+
+    for href in re.findall(r"""href=["']([^"'#]+)["']""", html, flags=re.IGNORECASE):
+        candidate = href.strip()
+        lower = candidate.lower()
+        if any(x in lower for x in ["openapi", "swagger", "api-docs", "spec"]) and (
+            lower.endswith(".json") or "json" in lower
+        ):
+            resolved = urljoin(docs_url, candidate)
+            spec_links.append(resolved)
+
+    path_re = re.compile(r"""(?:"|')(/api/[A-Za-z0-9_./{}:-]*)(?:"|')|(?:\b)(/api/[A-Za-z0-9_./{}:-]*)""")
+    for m in path_re.finditer(html):
+        path = (m.group(1) or m.group(2) or "").strip()
+        if not path or "//" in path:
+            continue
+        key = ("GET", path)
+        found[key] = {
+            "name": f"GET {path}",
+            "method": "GET",
+            "path": path,
+            "purpose": "UNKNOWN",
+            "params": {},
+            "enabled": False,
+            "discovered_from": "docs_html",
+            "unknowns": ["Method not explicitly verified in HTML; defaulted to GET for safe read-only audit handling."],
+        }
+
+    return list(found.values()), sorted(set(spec_links))
 
 
 def extract_get_endpoints(spec: dict[str, Any]) -> list[dict[str, Any]]:
@@ -172,11 +218,53 @@ def main() -> None:
 
     spec, docs_note = load_docs(docs_url)
     notes.append(docs_note)
+    docs_html_found = False
+    html_discovered: list[dict[str, Any]] = []
+    discovered_spec_links: list[str] = []
+
+    if docs_url and not spec:
+        raw, raw_note, ctype = load_docs_raw(docs_url)
+        notes.append(raw_note)
+        if raw and ("text/html" in (ctype or "").lower() or "<html" in raw[:500].lower()):
+            docs_html_found = True
+            sanitized_html = sanitize_data(raw)
+            write_md(output_dir / "docs_snapshot.html", sanitized_html)
+            html_discovered, discovered_spec_links = extract_endpoints_from_html(raw, docs_url)
 
     endpoint_inventory: list[dict[str, Any]] = []
     schema_summary: dict[str, Any] = {}
 
     discovered = extract_get_endpoints(spec) if spec else []
+    for ep in discovered:
+        ep["params"] = {}
+        ep["enabled"] = True
+        ep["discovered_from"] = "docs_json"
+    if html_discovered:
+        discovered.extend(html_discovered)
+
+    seed_path = base / "config" / "endpoints_seed.json"
+    seed_discovered: list[dict[str, Any]] = []
+    if seed_path.exists():
+        try:
+            seed_data = json.loads(seed_path.read_text(encoding="utf-8"))
+            for ep in seed_data.get("endpoints", []):
+                if not isinstance(ep, dict):
+                    continue
+                seed_discovered.append(
+                    {
+                        "name": ep.get("name", "UNKNOWN"),
+                        "method": ep.get("method", "GET"),
+                        "path": ep.get("path", "UNKNOWN"),
+                        "purpose": ep.get("purpose", "UNKNOWN"),
+                        "params": ep.get("params", {}),
+                        "enabled": bool(ep.get("enabled", False)),
+                        "discovered_from": "seed",
+                        "unknowns": [],
+                    }
+                )
+        except Exception as exc:
+            notes.append(f"Failed to parse config/endpoints_seed.json: {type(exc).__name__}")
+    discovered.extend(seed_discovered)
     if not discovered:
         notes.append("No discoverable GET endpoints from docs/spec")
 
@@ -186,10 +274,15 @@ def main() -> None:
             "method": ep["method"],
             "path": ep["path"],
             "purpose": ep["purpose"],
+            "discovered_from": ep.get("discovered_from", "unknown"),
+            "enabled": bool(ep.get("enabled", False)),
+            "params": ep.get("params", {}),
             "tested": False,
             "status": "UNKNOWN",
+            "status_code": "UNKNOWN",
+            "error": "",
             "notes": [],
-            "unknowns": [],
+            "unknowns": ep.get("unknowns", []).copy(),
         }
 
         required_params = [p.get("name") for p in ep.get("parameters", []) if p.get("required")]
@@ -198,6 +291,14 @@ def main() -> None:
             endpoint_inventory.append(inv)
             continue
 
+        if not inv["enabled"]:
+            inv["notes"].append("Endpoint not enabled for testing.")
+            endpoint_inventory.append(inv)
+            continue
+        if inv["method"].upper() != "GET":
+            inv["notes"].append("Non-GET endpoint skipped (safe read-only policy).")
+            endpoint_inventory.append(inv)
+            continue
         if not api_base or not api_key:
             inv["unknowns"].append("Missing required environment variables for live call")
             endpoint_inventory.append(inv)
@@ -210,6 +311,7 @@ def main() -> None:
         try:
             r = requests.get(url, headers=headers, timeout=20)
             inv["status"] = f"HTTP {r.status_code}"
+            inv["status_code"] = r.status_code
             inv["notes"].append({"response_headers": sanitize_headers(dict(r.headers))})
             payload: Any
             try:
@@ -224,6 +326,7 @@ def main() -> None:
             schema_summary[ep["name"]] = summarize_schema(spayload)
         except Exception as exc:
             inv["status"] = "ERROR"
+            inv["error"] = type(exc).__name__
             inv["unknowns"].append(f"Request failed: {type(exc).__name__}")
 
         endpoint_inventory.append(inv)
@@ -269,6 +372,10 @@ def main() -> None:
         "",
         "## Evidence Summary",
         f"- Docs/spec status: {docs_note}",
+        f"- Docs HTML detected: {'yes' if docs_html_found else 'no'}",
+        f"- HTML-discovered endpoint candidates: {len(html_discovered)}",
+        f"- HTML-discovered spec links: {len(discovered_spec_links)}",
+        (f"- Spec link candidates: {', '.join(discovered_spec_links)}" if discovered_spec_links else "- Spec link candidates: NONE"),
         f"- Discovered GET endpoints: {len(discovered)}",
         f"- Tested endpoints: {sum(1 for e in endpoint_inventory if e.get('tested'))}",
         "",
@@ -279,6 +386,12 @@ def main() -> None:
         "- Provide a machine-readable Arkham API spec or explicit read-only endpoint list and required query parameters, then rerun this auditor.",
     ]
 
+    if docs_html_found and not discovered and not seed_discovered:
+        next_md.insert(
+            9,
+            "- Docs page reachable, but no machine-readable or safely executable endpoint inventory was discovered.",
+        )
+
     if not endpoint_inventory:
         endpoint_inventory = [
             {
@@ -286,8 +399,13 @@ def main() -> None:
                 "method": "UNKNOWN",
                 "path": "UNKNOWN",
                 "purpose": "UNKNOWN",
+                "discovered_from": "unknown",
+                "enabled": False,
+                "params": {},
                 "tested": False,
                 "status": "UNKNOWN",
+                "status_code": "UNKNOWN",
+                "error": "",
                 "notes": notes,
                 "unknowns": unknowns + ["No endpoint inventory source available"],
             }

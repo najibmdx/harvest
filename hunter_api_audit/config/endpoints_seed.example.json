@@ -1,0 +1,12 @@
+{
+  "endpoints": [
+    {
+      "name": "example_read_only_endpoint",
+      "method": "GET",
+      "path": "/example/path",
+      "purpose": "UNKNOWN",
+      "params": {},
+      "enabled": false
+    }
+  ]
+}

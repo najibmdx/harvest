@@ -4,6 +4,8 @@
 - Audits **only** discoverable Arkham **read-only GET** API capabilities based on provided docs/spec.
 - Validates environment setup without exposing secrets.
 - Attempts safe test calls only for endpoints discovered from docs/spec.
+- Handles HTML docs pages by saving a sanitized snapshot and extracting only clear API-like endpoint paths/spec-link candidates without executing JavaScript.
+- Supports manual safe endpoint seeding via `config/endpoints_seed.json` (enabled `GET` endpoints only).
 - Saves sanitized sample responses and generated capability artifacts.
 - Produces explicit UNKNOWN states when required inputs are missing.
 
@@ -34,10 +36,17 @@ cd hunter_api_audit
 python scripts/run_audit.py
 ```
 
+## Optional manual endpoint seed
+- Copy `config/endpoints_seed.example.json` to `config/endpoints_seed.json`.
+- Add only verified read-only endpoints.
+- Set `"enabled": true` only for endpoints you want tested.
+- The auditor will never invent params and will skip non-GET endpoints.
+
 ## Output location
 All artifacts are written under:
 - `hunter_api_audit/output/`
 - sanitized response samples: `hunter_api_audit/output/sample_responses/`
+- docs HTML snapshot (if docs URL returns HTML): `hunter_api_audit/output/docs_snapshot.html`
 
 ## Warning
 This repository component contains **no trading logic** and is strictly limited to API capability auditing.
