@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-from parse_arkham_samples import parse_sample_file
+from parse_arkham_samples import parse_sample_file, walk_json_paths, find_dicts_with_keys, find_lists_of_dicts
 
 CATEGORIES = ["balances", "history", "flow", "counterparties", "intelligence", "intelligence_enriched", "transfers"]
 DEFAULT_CONFIG = {"phase1_output_dir": "hunter_phase1/output", "offline_only": True, "allow_new_api_calls": False, "wallet_labels": [], "max_records_per_category": 10000}
