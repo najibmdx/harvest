@@ -82,7 +82,7 @@ def main() -> None:
     wallets = extract_wallets(json.loads(index_path.read_text(encoding="utf-8")))
     diagnostics.append(f"- number of wallets found in Phase 1 index: {len(wallets)}")
 
-    timeline=[]; exposure_summary={}; flow_summary={}; counterparty_summary={}; identity_summary={}; coverage_rows=[]; pnl_rows=[]
+    timeline=[]; exposure_summary={}; flow_summary={}; counterparty_summary={}; identity_summary={}; coverage_rows=[]; pnl_rows=[]; shape_diagnostics=[]
     for w in wallets:
         wl = w.get("wallet_label") or "unknown_wallet"
         if cfg["wallet_labels"] and wl not in cfg["wallet_labels"]: continue
@@ -100,7 +100,25 @@ def main() -> None:
             parsed = parse_sample_file(resolved, max_records=cfg["max_records_per_category"])
             diagnostics.append(f"  - parser_status: {parsed['meta']['status']}")
             if parsed["meta"]["status"] != "ok": continue
-            payload = find_balance_payload(parsed, json.loads(resolved.read_text(encoding="utf-8"))) if cat == "balances" else json.loads(resolved.read_text(encoding="utf-8"))
+            payload = json.loads(resolved.read_text(encoding="utf-8"))
+            shape_paths = walk_json_paths(payload, max_depth=4)
+            shape_diagnostics.append({
+                "wallet_label": wl, "category": cat, "sample_file": str(resolved), "exists": True,
+                "json_type": "dict" if isinstance(payload, dict) else ("list" if isinstance(payload, list) else "null"),
+                "top_level_keys": list(payload.keys())[:30] if isinstance(payload, dict) else [],
+                "list_length": len(payload) if isinstance(payload, list) else None,
+                "first_item_type": type(payload[0]).__name__ if isinstance(payload, list) and payload else None,
+                "first_item_keys": list(payload[0].keys())[:30] if isinstance(payload, list) and payload and isinstance(payload[0], dict) else [],
+                "nested_key_paths": [x["path"] for x in shape_paths[:80]],
+                "candidate_entity_paths": [x["path"] for x in find_dicts_with_keys(payload, ["name", "id", "type"], max_depth=6)[:20]],
+                "candidate_label_paths": [x["path"] for x in find_dicts_with_keys(payload, ["name", "address", "chainType"], max_depth=6)[:20]],
+                "candidate_balance_paths": [x["path"] for x in find_dicts_with_keys(payload, ["balance"], max_depth=6)[:20]],
+                "candidate_token_row_paths": [x["path"] for x in find_dicts_with_keys(payload, ["symbol"], max_depth=6)[:20]],
+                "candidate_timestamp_paths": [x["path"] for x in find_dicts_with_keys(payload, ["quoteTime"], max_depth=6)[:20]],
+                "candidate_usd_paths": [x["path"] for x in find_dicts_with_keys(payload, ["usd"], max_depth=6)[:20]],
+                "candidate_transfer_paths": [x["path"] for x in find_lists_of_dicts(payload, max_depth=6)[:20]],
+            })
+            payload = find_balance_payload(parsed, payload) if cat == "balances" else payload
 
             if cat == "balances" and isinstance(payload, dict):
                 s["balances_parsed"] = True
@@ -172,6 +190,13 @@ def main() -> None:
     (out_dir / "wallet_flow_summary.json").write_text(json.dumps(flow_summary, indent=2), encoding="utf-8")
     (out_dir / "wallet_counterparty_summary.json").write_text(json.dumps(counterparty_summary, indent=2), encoding="utf-8")
     (out_dir / "wallet_identity_summary.json").write_text(json.dumps(identity_summary, indent=2), encoding="utf-8")
+    (out_dir / "raw_sample_shape_diagnostics.json").write_text(json.dumps(shape_diagnostics, indent=2), encoding="utf-8")
+    coverage_md = ["# Reconstruction Coverage Report", ""]
+    for wl, avail, miss, _, _ in coverage_rows:
+        count = len([e for e in timeline if e.get("wallet_label") == wl])
+        usable = "yes" if count > 0 and "balances" in avail and bool(identity_summary.get(wl, {}).get("arkham_entity_evidence")) and bool(exposure_summary.get(wl, {}).get("tokens_observed")) else "no"
+        coverage_md += [f"## {wl}", f"- Evidence categories available: {', '.join(avail) if avail else 'none'}", f"- Evidence categories missing: {', '.join(miss) if miss else 'none'}", f"- Successful parsed categories: {', '.join(avail) if avail else 'none'}", "- Failed parsed categories: none", f"- Number of timeline events produced: {count}", f"- Usable for Phase 3: {usable}", "- Blockers: none" if usable == "yes" else "- Blockers: insufficient extracted evidence", ""]
+    (out_dir / "reconstruction_coverage_report.md").write_text("\n".join(coverage_md), encoding="utf-8")
     pnl_md=["# PnL Feasibility Report","", "Phase 2 does not compute PnL. It only evaluates feasibility.",""]
     for r in pnl_rows:
         l,real,unr,t,a,p,ts,d,cb,disp,miss,v=r
@@ -182,6 +207,23 @@ def main() -> None:
     verdict = "A" if has_transfer else ("B" if has_bal_snap else "C")
     next_step = "Proceed to Phase 3A: PnL Reconstruction Design" if verdict=="A" else ("Expand Phase 1 evidence capture with additional transfer/trade/history coverage" if verdict=="B" else "Fix parsing/reconstruction coverage first")
     title = {"A":"Phase 2 reconstruction is sufficient to proceed to limited PnL reconstruction design","B":"Phase 2 reconstruction is partially sufficient but needs more evidence coverage","C":"Phase 2 reconstruction is insufficient"}[verdict]
-    (out_dir / "phase2_recommendation.md").write_text(f"# {verdict}) {title}\n\n- Evidence summary: Wallets processed: {len(coverage_rows)}. Timeline events: {len(timeline)}.\n- Main blockers: cost basis and disposal evidence gaps.\n- Safe next step: {next_step}\n", encoding="utf-8")
+    extra = "Raw samples loaded, but no token/balance rows were discoverable. See hunter_phase2/output/raw_sample_shape_diagnostics.json." if verdict == "C" else ""
+    (out_dir / "phase2_recommendation.md").write_text(f"# {verdict}) {title}\n\n- Evidence summary: Wallets processed: {len(coverage_rows)}. Timeline events: {len(timeline)}.\n- Main blockers: cost basis and disposal evidence gaps.\n- Safe next step: {next_step}\n- {extra}\n", encoding="utf-8")
+    coverage_total = sum(len([e for e in timeline if e.get("wallet_label") == wl]) for wl, *_ in coverage_rows)
+    balance_rows = sum(1 for e in timeline if e.get("event_type") == "balance_snapshot")
+    identity_count = sum(1 for v in identity_summary.values() if v.get("arkham_entity_evidence"))
+    pass_flag = "yes" if coverage_total == len(timeline) else "no"
+    (out_dir / "phase2_consistency_check.md").write_text(
+        "\n".join([
+            "# Phase 2 Consistency Check", "",
+            f"- timeline event count from wallet_activity_timeline.jsonl: {len(timeline)}",
+            f"- timeline event count used in reconstruction_coverage_report.md: {coverage_total}",
+            f"- balance token row count: {balance_rows}",
+            f"- identity record count: {identity_count}",
+            f"- phase2 recommendation verdict: {verdict}",
+            f"- consistency_pass: {pass_flag}",
+        ]),
+        encoding="utf-8",
+    )
 
 if __name__ == "__main__": main()
