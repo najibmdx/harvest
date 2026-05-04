@@ -1,13 +1,14 @@
 [
   {
-    "wallet_label": "fixture_wallet",
+    "wallet_label": "binance_public_evm_fixture",
     "realized_pnl_full_allowed": false,
     "realized_pnl_limited_allowed": false,
+    "realized_pnl_eligible": false,
     "unrealized_exposure_only_allowed": true,
     "flow_analysis_only_allowed": true,
     "not_pnl_eligible": true,
     "reasons": [
-      "Realized PnL modes blocked by evidence gaps."
+      "Realized PnL modes blocked by evidence gaps; this applies to realized PnL only."
     ],
     "blockers": [
       "missing_deterministic_trade_side",

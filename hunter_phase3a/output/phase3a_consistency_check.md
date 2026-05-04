@@ -9,4 +9,7 @@
 - any PnL numbers generated: no
 - any profitability labels generated: no
 - eligibility outputs generated: yes
+- unrealized exposure eligibility correct: yes
+- flow-only eligibility correct: yes
+- realized PnL correctly blocked: yes
 - consistency_pass: yes

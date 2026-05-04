@@ -1,6 +1,6 @@
 # PnL Evidence Gate Report
 
-## fixture_wallet
+## binance_public_evm_fixture
 - available evidence:
   - balance snapshots: 520
   - transfer events: 20
@@ -15,4 +15,6 @@
   - confirmed acquisition events
   - confirmed disposal events
   - fee/gas basis if absent
-- explicit gate verdict: EXPOSURE_ONLY_ALLOWED + FLOW_ONLY_ALLOWED
+- explicit gate verdict: REALIZED_PNL_BLOCKED
+- explicit gate verdict: UNREALIZED_EXPOSURE_ALLOWED
+- explicit gate verdict: FLOW_ANALYSIS_ALLOWED

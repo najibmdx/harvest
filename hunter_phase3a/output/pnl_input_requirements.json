@@ -35,7 +35,8 @@
       "constraint_verdicts"
     ],
     "disallowed_outputs": [
-      "pnl_values",
+      "realized_pnl_values",
+      "unrealized_pnl_values",
       "roi",
       "win_rate",
       "profitability_labels"
@@ -72,7 +73,8 @@
       "constraint_verdicts"
     ],
     "disallowed_outputs": [
-      "pnl_values",
+      "realized_pnl_values",
+      "unrealized_pnl_values",
       "roi",
       "win_rate",
       "profitability_labels"
@@ -95,19 +97,19 @@
       "balance_delta_is_realized_pnl"
     ],
     "minimum_event_types": [
-      "acquisition",
-      "disposal"
+      "balance_snapshot"
     ],
-    "required_direction_quality": "deterministic",
-    "required_price_quality": "execution_level",
-    "required_cost_basis_quality": "strict",
+    "required_direction_quality": "not_required",
+    "required_price_quality": "snapshot_or_quote_value",
+    "required_cost_basis_quality": "not_required",
     "allowed_outputs": [
-      "eligibility_flags",
-      "evidence_gaps",
-      "constraint_verdicts"
+      "exposure_eligibility_flags",
+      "exposure_evidence_gaps",
+      "exposure_constraint_verdicts"
     ],
     "disallowed_outputs": [
-      "pnl_values",
+      "realized_pnl_values",
+      "unrealized_pnl_values",
       "roi",
       "win_rate",
       "profitability_labels"
@@ -139,7 +141,8 @@
       "constraint_verdicts"
     ],
     "disallowed_outputs": [
-      "pnl_values",
+      "realized_pnl_values",
+      "unrealized_pnl_values",
       "roi",
       "win_rate",
       "profitability_labels"
@@ -172,7 +175,8 @@
       "constraint_verdicts"
     ],
     "disallowed_outputs": [
-      "pnl_values",
+      "realized_pnl_values",
+      "unrealized_pnl_values",
       "roi",
       "win_rate",
       "profitability_labels"
