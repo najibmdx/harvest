@@ -44,6 +44,12 @@ python scripts/run_audit.py
 - `ARKHAM_AUTH_MODE=x-api-key` sends `X-API-Key: <key>`
 - Only the selected auth header is sent per request.
 
+## Confirmed Arkham Auth Mode
+- Use `ARKHAM_AUTH_MODE=api-key`.
+- This sends `API-Key: <key>`.
+- `bearer` and `x-api-key` failed during Phase 0B testing.
+- Never commit real `.env` files.
+
 ## Optional manual endpoint seed
 - Copy `config/endpoints_seed.example.json` to `config/endpoints_seed.json`.
 - Add only verified read-only endpoints.

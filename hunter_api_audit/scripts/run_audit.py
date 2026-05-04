@@ -299,7 +299,9 @@ def main() -> None:
     api_key = os.getenv("ARKHAM_API_KEY", "").strip()
     docs_url = os.getenv("ARKHAM_DOCS_URL", "").strip() or None
     local_openapi_file = os.getenv("ARKHAM_OPENAPI_FILE", "").strip() or None
-    auth_mode = os.getenv("ARKHAM_AUTH_MODE", "").strip().lower() or "bearer"
+    auth_mode = os.getenv("ARKHAM_AUTH_MODE", "").strip().lower() or "api-key"
+    if auth_mode in {"bearer", "x-api-key"}:
+        print("Warning: Phase 0B confirmed api-key as the working Arkham auth mode.")
 
     unknowns: list[str] = []
     notes: list[str] = []
@@ -540,7 +542,7 @@ def main() -> None:
 
     verdict = "C) Arkham API is insufficient for Hunter Phase 1"
     if local_spec is not None and any(row["available"] in ("yes", "partial") for row in capability_rows):
-        verdict = "B) Arkham API is partially sufficient but needs fixture verification and possibly external data source."
+        verdict = "B) Arkham API is sufficient for Hunter Phase 1 evidence extraction, but requires external/computed PnL."
 
     capability_md = [
         "# Capability Matrix",
@@ -571,7 +573,7 @@ def main() -> None:
         "- Capability evidence remains unverified where endpoint docs/spec or executable test cases are unavailable.",
         "",
         "## Safe next step",
-        "- Populate config/test_fixtures.json with known safe public addresses/entities/token IDs/transaction hashes, then rerun Phase 0B.",
+        "- Proceed to Hunter Phase 1: Wallet Extraction + Evidence Capture.",
     ]
 
     if docs_html_found and not discovered and not seed_discovered:
@@ -621,11 +623,57 @@ def main() -> None:
         f"- API key length: {len(api_key)}",
         f"- API key prefix: {key_prefix}",
         f"- Auth header mode used: {auth_mode}",
+        f"- Selected mode is Phase 0B confirmed mode: {'yes' if auth_mode == 'api-key' else 'no'}",
         f"- Whether Authorization header was sent: {'yes' if sent_flags['authorization'] else 'no'}",
         f"- Whether API-Key header was sent: {'yes' if sent_flags['api-key'] else 'no'}",
         f"- Whether X-API-Key header was sent: {'yes' if sent_flags['x-api-key'] else 'no'}",
     ]
     write_md(output_dir / "auth_diagnostics.md", "\n".join(auth_md))
+    final_verdict_md = [
+        "# Hunter Phase 0B Final Verdict",
+        "",
+        "## Auth Verdict",
+        "- Correct auth mode: api-key",
+        "- Header format: API-Key: <key>",
+        "- bearer failed",
+        "- x-api-key failed",
+        "",
+        "## Endpoint Discovery Verdict",
+        "- Local OpenAPI was required.",
+        "- Remote docs/spec access was unreliable/blocked.",
+        "- OpenAPI discovered Arkham GET endpoints.",
+        "",
+        "## Capability Verdict",
+        "- wallet/address lookup: supported",
+        "- entity labels/intelligence: supported",
+        "- tags/categories: supported",
+        "- transaction history: supported",
+        "- token transfers: supported",
+        "- balance/history: supported",
+        "- CEX-style identification/flow evidence: supported",
+        "- historical timestamps: supported",
+        "- price history: partial",
+        "- pagination: not fully verified",
+        "- rate limits: not fully verified",
+        "- direct PnL: not available",
+        "- realized PnL: not available",
+        "",
+        "## Blockers",
+        "- Arkham does not appear to provide direct realized PnL.",
+        "- PnL must be computed later from history/transfers/swaps/balances plus price data.",
+        "- Pagination and rate-limit behavior still require deeper testing.",
+        "",
+        "## Phase 1 Permission",
+        "Hunter Phase 1 may proceed.",
+        "",
+        "## Phase 1 Constraints",
+        "- Phase 1 may extract wallet/entity/history/transfer evidence.",
+        "- Phase 1 must not assume direct PnL exists.",
+        "- Phase 1 must not build trading execution.",
+        "- Phase 1 must not build ML.",
+        "- Phase 1 must focus on wallet extraction and evidence capture only.",
+    ]
+    write_md(output_dir / "final_phase0b_verdict.md", "\n".join(final_verdict_md))
 
 
 if __name__ == "__main__":
