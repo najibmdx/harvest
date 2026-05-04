@@ -1,0 +1,17 @@
+{
+  "phase2_output_dir": "hunter_phase2/output",
+  "phase3a_output_dir": "hunter_phase3a/output",
+  "wallet_input_candidates": [
+    "config/wallet_inputs.json",
+    "hunter_phase1/config/wallet_inputs.json"
+  ],
+  "offline_only": false,
+  "allow_api_calls": true,
+  "allowed_online_endpoint_families": [
+    "/tx/{hash}"
+  ],
+  "max_tx_hashes_per_wallet": 100,
+  "strict_no_pnl": true,
+  "strict_no_profitability_labels": true,
+  "strict_no_external_price_api": true
+}
