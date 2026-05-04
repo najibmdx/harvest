@@ -30,12 +30,19 @@ pip install -r requirements.txt
    - `ARKHAM_API_BASE_URL`
    - `ARKHAM_DOCS_URL` (optional but strongly recommended for endpoint discovery)
    - `ARKHAM_OPENAPI_FILE` (optional local OpenAPI/spec JSON file path)
+   - `ARKHAM_AUTH_MODE` (`bearer`, `api-key`, or `x-api-key`; default is `bearer`)
 
 ## Run the audit
 ```bash
 cd hunter_api_audit
 python scripts/run_audit.py
 ```
+
+## Auth header mode
+- `ARKHAM_AUTH_MODE=bearer` sends `Authorization: Bearer <key>`
+- `ARKHAM_AUTH_MODE=api-key` sends `API-Key: <key>`
+- `ARKHAM_AUTH_MODE=x-api-key` sends `X-API-Key: <key>`
+- Only the selected auth header is sent per request.
 
 ## Optional manual endpoint seed
 - Copy `config/endpoints_seed.example.json` to `config/endpoints_seed.json`.

@@ -252,6 +252,10 @@ def resolve_param_with_fixtures(param_name: str, fixtures: dict[str, Any]) -> tu
 
 def categorize_status(status_code: int, payload: Any) -> str:
     text = json.dumps(payload).lower() if isinstance(payload, (dict, list)) else str(payload).lower()
+    if "api key" in text or "sign up" in text:
+        return "auth failure"
+    if "timestamp" in text:
+        return "timestamp format failure"
     if status_code == 401:
         return "auth failure"
     if status_code == 403:
@@ -262,6 +266,24 @@ def categorize_status(status_code: int, payload: Any) -> str:
     if 200 <= status_code < 300:
         return "endpoint working"
     return "unknown error"
+
+
+def build_auth_headers(auth_mode: str, api_key: str) -> tuple[dict[str, str], dict[str, bool]]:
+    mode = auth_mode.lower().strip()
+    if mode not in {"bearer", "api-key", "x-api-key"}:
+        mode = "bearer"
+    headers: dict[str, str] = {}
+    sent = {"authorization": False, "api-key": False, "x-api-key": False}
+    if mode == "bearer":
+        headers["Authorization"] = f"Bearer {api_key}"
+        sent["authorization"] = True
+    elif mode == "api-key":
+        headers["API-Key"] = api_key
+        sent["api-key"] = True
+    else:
+        headers["X-API-Key"] = api_key
+        sent["x-api-key"] = True
+    return headers, sent
 
 
 def main() -> None:
@@ -277,6 +299,7 @@ def main() -> None:
     api_key = os.getenv("ARKHAM_API_KEY", "").strip()
     docs_url = os.getenv("ARKHAM_DOCS_URL", "").strip() or None
     local_openapi_file = os.getenv("ARKHAM_OPENAPI_FILE", "").strip() or None
+    auth_mode = os.getenv("ARKHAM_AUTH_MODE", "").strip().lower() or "bearer"
 
     unknowns: list[str] = []
     notes: list[str] = []
@@ -375,6 +398,7 @@ def main() -> None:
         resolved_params = {}
         unresolved = []
         fixture_sources = {}
+        timestamp_param_names = {"timegte", "timelte", "timelast", "since", "from", "to"}
         for rp in required_params:
             value, source = resolve_param_with_fixtures(rp, fixtures)
             if value:
@@ -383,6 +407,18 @@ def main() -> None:
             else:
                 unresolved.append(rp)
         inv["params"] = sanitize_data(resolved_params)
+        query_params_to_send = {}
+        if isinstance(fixtures.get("query_params"), dict):
+            for k, v in fixtures["query_params"].items():
+                if v in ("", None):
+                    continue
+                if k.lower() in timestamp_param_names:
+                    query_params_to_send[k] = v
+                elif k.lower() in [n.lower() for n in inv.get("optional_params", [])]:
+                    query_params_to_send[k] = v
+        omitted_timestamps = [p for p in inv.get("optional_params", []) if p.lower() in timestamp_param_names and p not in query_params_to_send]
+        if omitted_timestamps:
+            inv["notes"].append({"timestamp_params_omitted": omitted_timestamps})
         if fixture_sources:
             inv["notes"].append({"fixture_source_used": fixture_sources})
         if unresolved:
@@ -410,12 +446,17 @@ def main() -> None:
         url = api_base.rstrip("/") + ep["path"]
         for key, value in resolved_params.items():
             url = url.replace("{" + key + "}", value)
-        headers = {"Authorization": f"Bearer {api_key}"}
+        headers, auth_sent = build_auth_headers(auth_mode, api_key)
         inv["tested"] = True
         inv["testable"] = True
+        inv["resolved_url_template"] = ep["path"]
+        inv["query_params_sent"] = sanitize_data(query_params_to_send)
+        inv["path_params_used"] = sanitize_data(resolved_params)
+        inv["auth_mode_used"] = auth_mode
+        inv["request_had_auth_header"] = any(auth_sent.values())
 
         try:
-            r = requests.get(url, headers=headers, timeout=20, params=resolved_params if resolved_params else None)
+            r = requests.get(url, headers=headers, timeout=20, params=query_params_to_send if query_params_to_send else None)
             inv["status"] = f"HTTP {r.status_code}"
             inv["status_code"] = r.status_code
             inv["notes"].append({"response_headers": sanitize_headers(dict(r.headers))})
@@ -429,7 +470,12 @@ def main() -> None:
             sample_path = sample_dir / fname
             write_json(sample_path, spayload)
             inv["notes"].append({"sample_file": str(sample_path.relative_to(base))})
-            inv["notes"].append({"result_category": categorize_status(r.status_code, spayload)})
+            result_category = categorize_status(r.status_code, spayload)
+            inv["notes"].append({"result_category": result_category})
+            if isinstance(spayload, dict):
+                inv["sanitized_error_message"] = sanitize_data(spayload.get("message") or spayload.get("error") or "")
+            else:
+                inv["sanitized_error_message"] = ""
             schema_summary[ep["name"]] = summarize_schema(spayload)
             if r.status_code in (400, 401, 403):
                 err_path = sample_dir / f"{ep['name'].replace('/', '_').replace(' ', '_')}_error.json"
@@ -438,6 +484,7 @@ def main() -> None:
             inv["status"] = "ERROR"
             inv["error"] = type(exc).__name__
             inv["unknowns"].append(f"Request failed: {type(exc).__name__}")
+            inv["sanitized_error_message"] = type(exc).__name__
 
         endpoint_inventory.append(inv)
 
@@ -566,6 +613,19 @@ def main() -> None:
     write_md(output_dir / "capability_matrix.md", "\n".join(capability_md))
     write_md(output_dir / "missing_data_report.md", "\n".join(missing_lines))
     write_md(output_dir / "next_phase_recommendation.md", "\n".join(next_md))
+    key_prefix = (api_key[:4] + "***") if api_key else "N/A"
+    auth_headers, sent_flags = build_auth_headers(auth_mode, api_key if api_key else "")
+    auth_md = [
+        "# Auth Diagnostics",
+        f"- ARKHAM_API_KEY exists: {'yes' if bool(api_key) else 'no'}",
+        f"- API key length: {len(api_key)}",
+        f"- API key prefix: {key_prefix}",
+        f"- Auth header mode used: {auth_mode}",
+        f"- Whether Authorization header was sent: {'yes' if sent_flags['authorization'] else 'no'}",
+        f"- Whether API-Key header was sent: {'yes' if sent_flags['api-key'] else 'no'}",
+        f"- Whether X-API-Key header was sent: {'yes' if sent_flags['x-api-key'] else 'no'}",
+    ]
+    write_md(output_dir / "auth_diagnostics.md", "\n".join(auth_md))
 
 
 if __name__ == "__main__":

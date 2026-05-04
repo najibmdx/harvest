@@ -22,5 +22,9 @@
   },
   "tags": {
     "tag_id": ""
+  },
+  "query_params": {
+    "limit": 10,
+    "offset": 0
   }
 }
