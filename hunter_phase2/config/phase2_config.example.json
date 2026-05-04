@@ -1,0 +1,7 @@
+{
+  "phase1_output_dir": "hunter_phase1/output",
+  "offline_only": true,
+  "allow_new_api_calls": false,
+  "wallet_labels": [],
+  "max_records_per_category": 10000
+}
