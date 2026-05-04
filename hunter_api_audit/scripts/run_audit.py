@@ -32,6 +32,15 @@ CAPABILITIES = [
     "price history",
 ]
 
+FIXTURE_PARAM_HINTS = {
+    "address": [("addresses", "evm"), ("addresses", "btc"), ("addresses", "solana")],
+    "entity": [("entities", "exchange"), ("entities", "fund"), ("entities", "project")],
+    "hash": [("transactions", "evm_hash"), ("transactions", "btc_hash"), ("transactions", "solana_hash")],
+    "token": [("tokens", "evm_token_address"), ("tokens", "solana_token_address"), ("tokens", "pricing_id")],
+    "chain": [("tokens", "evm_chain")],
+    "tag": [("tags", "tag_id")],
+}
+
 
 def ensure_dirs(base: Path) -> dict[str, Path]:
     out = base / "output"
@@ -215,6 +224,46 @@ def summarize_schema(data: Any) -> dict[str, Any]:
     return summary
 
 
+def load_test_fixtures(base: Path) -> tuple[dict[str, Any], str]:
+    fixture_path = base / "config" / "test_fixtures.json"
+    if not fixture_path.exists():
+        return {}, "config/test_fixtures.json not provided"
+    try:
+        raw = json.loads(fixture_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {}, f"Failed to parse config/test_fixtures.json: {type(exc).__name__}"
+    cleaned: dict[str, Any] = {}
+    for section, values in raw.items():
+        if isinstance(values, dict):
+            cleaned[section] = {k: v for k, v in values.items() if isinstance(v, str) and v.strip()}
+    return cleaned, "Loaded config/test_fixtures.json"
+
+
+def resolve_param_with_fixtures(param_name: str, fixtures: dict[str, Any]) -> tuple[str | None, str]:
+    pname = param_name.lower()
+    for needle, candidates in FIXTURE_PARAM_HINTS.items():
+        if needle in pname:
+            for section, key in candidates:
+                value = fixtures.get(section, {}).get(key)
+                if value:
+                    return value, f"{section}.{key}"
+    return None, ""
+
+
+def categorize_status(status_code: int, payload: Any) -> str:
+    text = json.dumps(payload).lower() if isinstance(payload, (dict, list)) else str(payload).lower()
+    if status_code == 401:
+        return "auth failure"
+    if status_code == 403:
+        return "permission/tier restriction"
+    if status_code == 400:
+        if any(x in text for x in ["param", "invalid", "missing", "required"]):
+            return "missing/invalid params"
+    if 200 <= status_code < 300:
+        return "endpoint working"
+    return "unknown error"
+
+
 def main() -> None:
     script_dir = Path(__file__).resolve().parent
     base = script_dir.parent
@@ -264,6 +313,8 @@ def main() -> None:
 
     endpoint_inventory: list[dict[str, Any]] = []
     schema_summary: dict[str, Any] = {}
+    fixtures, fixture_note = load_test_fixtures(base)
+    notes.append(fixture_note)
 
     discovered = extract_get_endpoints(spec) if spec else []
     for ep in discovered:
@@ -321,8 +372,21 @@ def main() -> None:
         }
 
         required_params = [p.get("name") for p in ep.get("parameters", []) if isinstance(p, dict) and p.get("required")]
-        if required_params:
-            inv["unknowns"].append(f"Required params unresolved: {required_params}")
+        resolved_params = {}
+        unresolved = []
+        fixture_sources = {}
+        for rp in required_params:
+            value, source = resolve_param_with_fixtures(rp, fixtures)
+            if value:
+                resolved_params[rp] = value
+                fixture_sources[rp] = source
+            else:
+                unresolved.append(rp)
+        inv["params"] = sanitize_data(resolved_params)
+        if fixture_sources:
+            inv["notes"].append({"fixture_source_used": fixture_sources})
+        if unresolved:
+            inv["unknowns"].append(f"Required params unresolved: {unresolved}")
             inv["reason_not_tested"] = "Missing required params; params were not invented."
             endpoint_inventory.append(inv)
             continue
@@ -344,12 +408,14 @@ def main() -> None:
             continue
 
         url = api_base.rstrip("/") + ep["path"]
+        for key, value in resolved_params.items():
+            url = url.replace("{" + key + "}", value)
         headers = {"Authorization": f"Bearer {api_key}"}
         inv["tested"] = True
         inv["testable"] = True
 
         try:
-            r = requests.get(url, headers=headers, timeout=20)
+            r = requests.get(url, headers=headers, timeout=20, params=resolved_params if resolved_params else None)
             inv["status"] = f"HTTP {r.status_code}"
             inv["status_code"] = r.status_code
             inv["notes"].append({"response_headers": sanitize_headers(dict(r.headers))})
@@ -363,7 +429,11 @@ def main() -> None:
             sample_path = sample_dir / fname
             write_json(sample_path, spayload)
             inv["notes"].append({"sample_file": str(sample_path.relative_to(base))})
+            inv["notes"].append({"result_category": categorize_status(r.status_code, spayload)})
             schema_summary[ep["name"]] = summarize_schema(spayload)
+            if r.status_code in (400, 401, 403):
+                err_path = sample_dir / f"{ep['name'].replace('/', '_').replace(' ', '_')}_error.json"
+                write_json(err_path, {"status_code": r.status_code, "body": spayload})
         except Exception as exc:
             inv["status"] = "ERROR"
             inv["error"] = type(exc).__name__
@@ -371,18 +441,49 @@ def main() -> None:
 
         endpoint_inventory.append(inv)
 
+    capability_rules = {
+        "wallet/address lookup": ["intelligence/address", "address_enriched", "balances/address", "history/address"],
+        "entity labels": ["intelligence/entity", "entities/updates", "address_enriched"],
+        "tags/categories": ["address_tags/updates", "tags/updates", "includetags"],
+        "transaction history": ["/tx/", "transfers/tx", "transfers"],
+        "token transfers": ["transfers", "histogram"],
+        "balance history": ["balances/address", "balances/entity", "portfolio/address", "timeseries", "history/address"],
+        "CEX wallet identification": ["intelligence", "entitytype", "depositexchangeid", "service", "label", "tag"],
+        "deposit/withdrawal detection": ["transfers", "counterpart", "flow", "exchange", "entity"],
+        "historical timestamps": ["timegte", "timelte", "timelast", "since", "from", "to"],
+        "pagination": ["limit", "offset", "pagetoken", "cursor"],
+        "rate limits": ["x-ratelimit", "rate"],
+        "PnL data": ["pnl", "performance"],
+        "realized PnL directly available": ["realized_pnl", "realizedpnl"],
+        "price history": ["price/history", "token/price"],
+    }
     capability_rows = []
+    inv_text = json.dumps(endpoint_inventory).lower()
     for cap in CAPABILITIES:
-        capability_rows.append(
-            {
-                "capability": cap,
-                "available": "unknown",
-                "evidence_endpoint": "UNKNOWN",
-                "sample_file": "UNKNOWN",
-                "confidence": "low",
-                "notes": "No verified mapping yet from tested Arkham endpoint evidence.",
-            }
-        )
+        needles = capability_rules.get(cap, [])
+        matched = [e for e in endpoint_inventory if any(n in (e.get("path", "") + e.get("name", "")).lower() for n in needles)]
+        available = "unknown"
+        notes_msg = "No endpoint/schema evidence."
+        confidence = "low"
+        sample_file = "UNKNOWN"
+        evidence = "UNKNOWN"
+        if matched:
+            available = "partial"
+            evidence = matched[0].get("path", "UNKNOWN")
+            for n in matched[0].get("notes", []):
+                if isinstance(n, dict) and "sample_file" in n:
+                    sample_file = n["sample_file"]
+            if any(str(m.get("status_code")) == "200" for m in matched):
+                available = "yes"
+                confidence = "high"
+                notes_msg = "Endpoint tested successfully with evidence."
+            else:
+                notes_msg = "OpenAPI evidence exists; full verification incomplete."
+                confidence = "medium"
+        if cap in ["PnL data", "realized PnL directly available"] and not any(k in inv_text for k in needles):
+            available = "no"
+            notes_msg = "No explicit PnL evidence in discovered endpoints/schemas."
+        capability_rows.append({"capability": cap, "available": available, "evidence_endpoint": evidence, "sample_file": sample_file, "confidence": confidence, "notes": notes_msg})
 
     missing_lines = ["# Missing Data Report", "", "## Unavailable or Unverified Capabilities", ""]
     for row in capability_rows:
@@ -391,8 +492,8 @@ def main() -> None:
         )
 
     verdict = "C) Arkham API is insufficient for Hunter Phase 1"
-    if discovered and any(ep.get("tested") for ep in endpoint_inventory):
-        verdict = "B) Arkham API is partially sufficient but needs external data source"
+    if local_spec is not None and any(row["available"] in ("yes", "partial") for row in capability_rows):
+        verdict = "B) Arkham API is partially sufficient but needs fixture verification and possibly external data source."
 
     capability_md = [
         "# Capability Matrix",
@@ -423,7 +524,7 @@ def main() -> None:
         "- Capability evidence remains unverified where endpoint docs/spec or executable test cases are unavailable.",
         "",
         "## Safe next step",
-        "- Provide a machine-readable Arkham API spec or explicit read-only endpoint list and required query parameters, then rerun this auditor.",
+        "- Populate config/test_fixtures.json with known safe public addresses/entities/token IDs/transaction hashes, then rerun Phase 0B.",
     ]
 
     if docs_html_found and not discovered and not seed_discovered:

@@ -43,6 +43,12 @@ python scripts/run_audit.py
 - Set `"enabled": true` only for endpoints you want tested.
 - The auditor will never invent params and will skip non-GET endpoints.
 
+## Phase 0B fixture-based verification
+- Copy `config/test_fixtures.example.json` to `config/test_fixtures.json`.
+- Fill only known safe public values you provide (addresses, entities, token IDs, tx hashes, tags).
+- Empty strings are treated as unavailable; missing required params are never guessed.
+- Fixtures are used only for required path/query parameter resolution on read-only GET calls.
+
 ## OpenAPI local fallback (for blocked remote docs)
 - If `ARKHAM_DOCS_URL` is blocked or returns HTTP 403, manually download the Arkham OpenAPI/spec JSON and store it locally.
 - Set:
