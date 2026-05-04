@@ -1,0 +1,17 @@
+{
+  "wallets": [
+    {
+      "label": "example_binance_wallet",
+      "chain": "ethereum",
+      "address": "0x0000000000000000000000000000000000000000",
+      "source": "manual_public_fixture"
+    }
+  ],
+  "entities": [
+    {
+      "label": "example_exchange",
+      "entity": "binance",
+      "source": "manual_public_fixture"
+    }
+  ]
+}
