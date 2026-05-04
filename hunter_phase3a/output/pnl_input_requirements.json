@@ -1,0 +1,181 @@
+{
+  "REALIZED_PNL_FULL": {
+    "required_fields": [
+      "confirmed_acquisition_events",
+      "confirmed_disposal_events",
+      "deterministic_wallet_direction",
+      "token_amount",
+      "timestamp",
+      "execution_price_or_historical_usd_at_execution",
+      "cost_basis_method",
+      "chain_token_identity",
+      "transaction_hash",
+      "no_unresolved_transfer_as_trade_ambiguity"
+    ],
+    "optional_fields": [
+      "fee_gas_data"
+    ],
+    "forbidden_assumptions": [
+      "transfer_is_trade",
+      "deposit_is_buy",
+      "withdrawal_is_sell",
+      "historicalUSD_is_cost_basis",
+      "balance_delta_is_realized_pnl"
+    ],
+    "minimum_event_types": [
+      "acquisition",
+      "disposal"
+    ],
+    "required_direction_quality": "deterministic",
+    "required_price_quality": "execution_level",
+    "required_cost_basis_quality": "strict",
+    "allowed_outputs": [
+      "eligibility_flags",
+      "evidence_gaps",
+      "constraint_verdicts"
+    ],
+    "disallowed_outputs": [
+      "pnl_values",
+      "roi",
+      "win_rate",
+      "profitability_labels"
+    ]
+  },
+  "REALIZED_PNL_LIMITED": {
+    "required_fields": [
+      "confirmed_acquisition_events",
+      "confirmed_disposal_events",
+      "deterministic_wallet_direction",
+      "reconstructable_cost_basis",
+      "no_transfer_only_trade_inference"
+    ],
+    "optional_fields": [
+      "fee_gas_data_explicitly_excluded"
+    ],
+    "forbidden_assumptions": [
+      "transfer_is_trade",
+      "deposit_is_buy",
+      "withdrawal_is_sell",
+      "historicalUSD_is_cost_basis",
+      "balance_delta_is_realized_pnl"
+    ],
+    "minimum_event_types": [
+      "acquisition",
+      "disposal"
+    ],
+    "required_direction_quality": "deterministic",
+    "required_price_quality": "execution_level",
+    "required_cost_basis_quality": "strict",
+    "allowed_outputs": [
+      "eligibility_flags",
+      "evidence_gaps",
+      "constraint_verdicts"
+    ],
+    "disallowed_outputs": [
+      "pnl_values",
+      "roi",
+      "win_rate",
+      "profitability_labels"
+    ]
+  },
+  "UNREALIZED_EXPOSURE_ONLY": {
+    "required_fields": [
+      "current_balance_snapshot",
+      "token_amount",
+      "token_price_or_usd_value",
+      "quote_time",
+      "chain_token_identity"
+    ],
+    "optional_fields": [],
+    "forbidden_assumptions": [
+      "transfer_is_trade",
+      "deposit_is_buy",
+      "withdrawal_is_sell",
+      "historicalUSD_is_cost_basis",
+      "balance_delta_is_realized_pnl"
+    ],
+    "minimum_event_types": [
+      "acquisition",
+      "disposal"
+    ],
+    "required_direction_quality": "deterministic",
+    "required_price_quality": "execution_level",
+    "required_cost_basis_quality": "strict",
+    "allowed_outputs": [
+      "eligibility_flags",
+      "evidence_gaps",
+      "constraint_verdicts"
+    ],
+    "disallowed_outputs": [
+      "pnl_values",
+      "roi",
+      "win_rate",
+      "profitability_labels"
+    ]
+  },
+  "FLOW_ANALYSIS_ONLY": {
+    "required_fields": [
+      "transfer_or_flow_records",
+      "timestamp",
+      "amount_or_usd_value"
+    ],
+    "optional_fields": [],
+    "forbidden_assumptions": [
+      "transfer_is_trade",
+      "deposit_is_buy",
+      "withdrawal_is_sell",
+      "historicalUSD_is_cost_basis",
+      "balance_delta_is_realized_pnl"
+    ],
+    "minimum_event_types": [
+      "transfer_or_flow"
+    ],
+    "required_direction_quality": "not_required",
+    "required_price_quality": "snapshot_or_transfer_usd",
+    "required_cost_basis_quality": "not_required",
+    "allowed_outputs": [
+      "eligibility_flags",
+      "evidence_gaps",
+      "constraint_verdicts"
+    ],
+    "disallowed_outputs": [
+      "pnl_values",
+      "roi",
+      "win_rate",
+      "profitability_labels"
+    ]
+  },
+  "NOT_PNL_ELIGIBLE": {
+    "required_fields": [
+      "no_deterministic_trade_side",
+      "no_cost_basis",
+      "no_confirmed_disposal_evidence",
+      "balances_transfers_flows_only"
+    ],
+    "optional_fields": [],
+    "forbidden_assumptions": [
+      "transfer_is_trade",
+      "deposit_is_buy",
+      "withdrawal_is_sell",
+      "historicalUSD_is_cost_basis",
+      "balance_delta_is_realized_pnl"
+    ],
+    "minimum_event_types": [
+      "transfer_or_flow"
+    ],
+    "required_direction_quality": "not_required",
+    "required_price_quality": "snapshot_or_transfer_usd",
+    "required_cost_basis_quality": "not_required",
+    "allowed_outputs": [
+      "eligibility_flags",
+      "evidence_gaps",
+      "constraint_verdicts"
+    ],
+    "disallowed_outputs": [
+      "pnl_values",
+      "roi",
+      "win_rate",
+      "profitability_labels"
+    ]
+  }
+}
