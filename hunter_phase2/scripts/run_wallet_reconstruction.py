@@ -61,22 +61,58 @@ def extract_wallets(index_data: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def resolve_project_paths(script_path: Path) -> Tuple[Path, Path]:
+    cwd = Path.cwd().resolve()
+    if (cwd / "hunter_phase2").exists():
+        return cwd, cwd / "hunter_phase2"
+    phase2_dir = script_path.parents[1]
+    if phase2_dir.name == "hunter_phase2":
+        return phase2_dir.parent, phase2_dir
+    return cwd, cwd / "hunter_phase2"
+
+
+def resolve_phase1_output_dir(repo_root: Path, cfg_phase1: str) -> Tuple[Path, List[Path]]:
+    attempted: List[Path] = []
+    configured = Path(cfg_phase1)
+    if configured.is_absolute():
+        attempted.append(configured)
+    else:
+        attempted.append((repo_root / configured).resolve())
+    attempted.append((repo_root / "hunter_phase1" / "output").resolve())
+    attempted.append((repo_root / "output").resolve())
+    for candidate in attempted:
+        if (candidate / "wallet_evidence_index.json").exists():
+            return candidate, attempted
+    return attempted[0], attempted
+
+
 def main() -> None:
     script_path = Path(__file__).resolve()
-    phase2_dir = script_path.parents[1]
-    repo_root = phase2_dir.parent
+    repo_root, phase2_dir = resolve_project_paths(script_path)
     out_dir = phase2_dir / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "reconstructed").mkdir(parents=True, exist_ok=True)
 
     cfg = load_config(phase2_dir)
-    phase1_output_dir = (repo_root / cfg["phase1_output_dir"]).resolve()
+    phase1_output_dir, phase1_attempts = resolve_phase1_output_dir(repo_root, cfg["phase1_output_dir"])
     index_path = phase1_output_dir / "wallet_evidence_index.json"
 
-    diagnostics = ["# Phase 2 Input Diagnostics", "", f"- resolved phase1_output_dir: `{phase1_output_dir}`", f"- wallet_evidence_index.json exists: {'yes' if index_path.exists() else 'no'}"]
+    diagnostics = [
+        "# Phase 2 Input Diagnostics",
+        "",
+        f"- script path: `{script_path}`",
+        f"- current working directory: `{Path.cwd().resolve()}`",
+        f"- resolved repo root: `{repo_root}`",
+        f"- resolved phase1_output_dir: `{phase1_output_dir}`",
+        f"- wallet_evidence_index.json exists: {'yes' if index_path.exists() else 'no'}",
+    ]
     if not index_path.exists():
+        diagnostics.append("- attempted phase1_output_dir paths:")
+        for p in phase1_attempts:
+            diagnostics.append(f"  - `{p}`")
         (out_dir / "phase2_input_diagnostics.md").write_text("\n".join(diagnostics), encoding="utf-8")
-        raise SystemExit(f"missing required input: {index_path}")
+        attempted_str = ", ".join(str(p / "wallet_evidence_index.json") for p in phase1_attempts)
+        raise SystemExit(f"missing required input: {index_path}. attempted: {attempted_str}")
 
     index_data = json.loads(index_path.read_text(encoding="utf-8"))
     wallets = extract_wallets(index_data)
