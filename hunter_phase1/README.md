@@ -20,6 +20,7 @@ Create `hunter_phase1/config/wallet_inputs.json` from `wallet_inputs.example.jso
 - `ARKHAM_API_KEY`
 - `ARKHAM_API_BASE_URL`
 - `ARKHAM_AUTH_MODE` (defaults to `api-key`; this mode is required)
+- `ARKHAM_OPENAPI_FILE` (optional; used to auto-pick a no-param sanity endpoint)
 
 ## Run
 ```bash
@@ -32,6 +33,9 @@ python3 hunter_phase1/scripts/run_wallet_evidence_capture.py
 - `hunter_phase1/output/endpoint_success_matrix.md`
 - `hunter_phase1/output/missing_evidence_report.md`
 - `hunter_phase1/output/phase1_recommendation.md`
+- `hunter_phase1/output/phase1_auth_diagnostics.md`
+- `hunter_phase1/output/phase1_request_diagnostics.json`
+- `hunter_phase1/output/raw_samples/auth_sanity_check.json`
 
 ## Notes
 - API keys are never printed or persisted.
