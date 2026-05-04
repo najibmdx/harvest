@@ -218,9 +218,13 @@ def main() -> None:
         has_prices = bool(exposure_summary[wl]["top_token_exposures_by_usd"]) or any(e.get("usd_value") is not None for e in transfer_events)
         has_timestamps = bool(exposure_summary[wl]["quote_time_coverage"]) or any(e.get("timestamp") is not None for e in transfer_events)
         has_transfers = s["transfer_events"] > 0; has_direction = s["inbound"] > 0 or s["outbound"] > 0
-        missing_fields = [x for x, ok in {"transfers":has_transfers,"token amounts":has_amounts,"token prices":has_prices,"timestamps":has_timestamps,"trade direction":False,"cost basis":False}.items() if not ok]
+        disposal_status = "partial" if s["outbound"] > 0 else ("not confirmed" if s["unknown"] > 0 else "no")
+        missing_fields = [x for x, ok in {"transfers":has_transfers,"token amounts":has_amounts,"token prices":has_prices,"timestamps":has_timestamps}.items() if not ok]
+        missing_fields += ["trade direction", "cost basis"]
+        if disposal_status in {"no", "not confirmed"}:
+            missing_fields.append("confirmed disposal/sell evidence")
         verdict = "PARTIALLY_FEASIBLE_WITH_MORE_DATA" if has_amounts and has_prices and has_timestamps else "NOT_FEASIBLE_YET"
-        pnl_rows.append((wl,"no","partial" if has_amounts and has_prices and has_timestamps else "no",has_transfers,has_amounts,has_prices,has_timestamps,False,False,("partial" if s["outbound"] > 0 else "no"),missing_fields,verdict))
+        pnl_rows.append((wl,"no","partial" if has_amounts and has_prices and has_timestamps else "no",has_transfers,has_amounts,has_prices,has_timestamps,False,False,disposal_status,s["unknown"],missing_fields,verdict))
         coverage_rows.append((wl, available, missing, len([e for e in timeline if e["wallet_label"]==wl]), "yes" if s["balances_parsed"] else "no"))
 
     (out_dir / "phase2_input_diagnostics.md").write_text("\n".join(diagnostics)+"\n", encoding="utf-8")
@@ -238,8 +242,8 @@ def main() -> None:
     (out_dir / "reconstruction_coverage_report.md").write_text("\n".join(coverage_md), encoding="utf-8")
     pnl_md=["# PnL Feasibility Report","", "Phase 2 does not compute PnL. It only evaluates feasibility.",""]
     for r in pnl_rows:
-        l,real,unr,t,a,p,ts,d,cb,disp,miss,v=r
-        pnl_md += [f"## {l}",f"- Can realized PnL be computed now? {real}",f"- Can unrealized exposure be estimated now? {unr}","- Required evidence available:",f"  - transfers: {'yes' if t else 'no'}",f"  - token amounts: {'yes' if a else 'no'}",f"  - token prices: {'yes' if p else 'no'}",f"  - timestamps: {'yes' if ts else 'no'}",f"  - trade direction: {'yes' if d else 'no'}",f"  - cost basis: {'yes' if cb else 'no'}",f"  - disposal/sell evidence: {'yes' if disp else 'no'}",f"- Missing evidence: {', '.join(miss) if miss else 'none'}",f"- Verdict: {v}",""]
+        l,real,unr,t,a,p,ts,d,cb,disp,unknown_count,miss,v=r
+        pnl_md += [f"## {l}",f"- Can realized PnL be computed now? {real}",f"- Can unrealized exposure be estimated now? {unr}","- Required evidence available:",f"  - transfers: {'yes' if t else 'no'}",f"  - token amounts: {'yes' if a else 'no'}",f"  - token prices: {'yes' if p else 'no'}",f"  - timestamps: {'yes' if ts else 'no'}",f"  - trade direction: {'yes' if d else 'no'}",f"  - cost basis: {'yes' if cb else 'no'}",f"  - disposal/sell evidence: {disp}",f"- Missing evidence: {', '.join(miss) if miss else 'none'}",f"- Direction note: transfer records exist but direction is unknown for {unknown_count} event(s)." if unknown_count > 0 else "- Direction note: direction available from deterministic wallet-address matching.",f"- Verdict: {v}",""]
     (out_dir / "pnl_feasibility_report.md").write_text("\n".join(pnl_md), encoding="utf-8")
     has_transfer = any(x[3] for x in pnl_rows)
     has_bal_snap = any(e.get("event_type")=="balance_snapshot" for e in timeline)
