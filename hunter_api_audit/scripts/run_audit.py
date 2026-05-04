@@ -8,7 +8,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import requests
 from dotenv import load_dotenv
@@ -68,6 +68,21 @@ def load_docs(url: str | None) -> tuple[dict[str, Any] | None, str]:
     return data, "Docs/spec loaded"
 
 
+def load_local_openapi(path_value: str | None, base: Path) -> tuple[dict[str, Any] | None, str]:
+    if not path_value:
+        return None, "ARKHAM_OPENAPI_FILE not provided"
+    p = Path(path_value)
+    if not p.is_absolute():
+        p = base / p
+    if not p.exists():
+        return None, f"ARKHAM_OPENAPI_FILE not found: {p}"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return None, f"Failed to parse ARKHAM_OPENAPI_FILE: {type(exc).__name__}"
+    return data, f"Loaded local OpenAPI/spec: {p}"
+
+
 def load_docs_raw(url: str | None) -> tuple[str | None, str, str | None]:
     if not url:
         return None, "ARKHAM_DOCS_URL not provided", None
@@ -124,13 +139,18 @@ def extract_get_endpoints(spec: dict[str, Any]) -> list[dict[str, Any]]:
         get_op = methods.get("get")
         if not isinstance(get_op, dict):
             continue
+        params = get_op.get("parameters", [])
+        required_params = [p.get("name") for p in params if isinstance(p, dict) and p.get("required")]
+        optional_params = [p.get("name") for p in params if isinstance(p, dict) and not p.get("required")]
         endpoints.append(
             {
                 "name": get_op.get("operationId") or f"GET {path}",
                 "method": "GET",
                 "path": path,
                 "purpose": get_op.get("summary") or "UNKNOWN",
-                "parameters": get_op.get("parameters", []),
+                "parameters": params,
+                "required_params": required_params,
+                "optional_params": optional_params,
             }
         )
     return endpoints
@@ -207,6 +227,7 @@ def main() -> None:
     api_base = os.getenv("ARKHAM_API_BASE_URL", "").strip()
     api_key = os.getenv("ARKHAM_API_KEY", "").strip()
     docs_url = os.getenv("ARKHAM_DOCS_URL", "").strip() or None
+    local_openapi_file = os.getenv("ARKHAM_OPENAPI_FILE", "").strip() or None
 
     unknowns: list[str] = []
     notes: list[str] = []
@@ -216,7 +237,15 @@ def main() -> None:
     if not api_key:
         unknowns.append("ARKHAM_API_KEY missing")
 
-    spec, docs_note = load_docs(docs_url)
+    local_spec, local_spec_note = load_local_openapi(local_openapi_file, base)
+    notes.append(local_spec_note)
+    spec = local_spec
+    docs_note = "Skipped remote docs fetch because local OpenAPI/spec was used."
+    remote_docs_http_403 = False
+    if spec is None:
+        spec, docs_note = load_docs(docs_url)
+        if "HTTP 403" in docs_note:
+            remote_docs_http_403 = True
     notes.append(docs_note)
     docs_html_found = False
     html_discovered: list[dict[str, Any]] = []
@@ -225,6 +254,8 @@ def main() -> None:
     if docs_url and not spec:
         raw, raw_note, ctype = load_docs_raw(docs_url)
         notes.append(raw_note)
+        if "HTTP 403" in raw_note:
+            remote_docs_http_403 = True
         if raw and ("text/html" in (ctype or "").lower() or "<html" in raw[:500].lower()):
             docs_html_found = True
             sanitized_html = sanitize_data(raw)
@@ -238,7 +269,7 @@ def main() -> None:
     for ep in discovered:
         ep["params"] = {}
         ep["enabled"] = True
-        ep["discovered_from"] = "docs_json"
+        ep["discovered_from"] = "local_openapi" if local_spec is not None else "docs_json"
     if html_discovered:
         discovered.extend(html_discovered)
 
@@ -278,6 +309,10 @@ def main() -> None:
             "enabled": bool(ep.get("enabled", False)),
             "params": ep.get("params", {}),
             "tested": False,
+            "testable": False,
+            "required_params": ep.get("required_params", []),
+            "optional_params": ep.get("optional_params", []),
+            "reason_not_tested": "",
             "status": "UNKNOWN",
             "status_code": "UNKNOWN",
             "error": "",
@@ -285,28 +320,33 @@ def main() -> None:
             "unknowns": ep.get("unknowns", []).copy(),
         }
 
-        required_params = [p.get("name") for p in ep.get("parameters", []) if p.get("required")]
+        required_params = [p.get("name") for p in ep.get("parameters", []) if isinstance(p, dict) and p.get("required")]
         if required_params:
             inv["unknowns"].append(f"Required params unresolved: {required_params}")
+            inv["reason_not_tested"] = "Missing required params; params were not invented."
             endpoint_inventory.append(inv)
             continue
 
         if not inv["enabled"]:
             inv["notes"].append("Endpoint not enabled for testing.")
+            inv["reason_not_tested"] = "Endpoint disabled."
             endpoint_inventory.append(inv)
             continue
         if inv["method"].upper() != "GET":
             inv["notes"].append("Non-GET endpoint skipped (safe read-only policy).")
+            inv["reason_not_tested"] = "Non-GET endpoint."
             endpoint_inventory.append(inv)
             continue
         if not api_base or not api_key:
             inv["unknowns"].append("Missing required environment variables for live call")
+            inv["reason_not_tested"] = "Missing ARKHAM_API_BASE_URL or ARKHAM_API_KEY."
             endpoint_inventory.append(inv)
             continue
 
         url = api_base.rstrip("/") + ep["path"]
         headers = {"Authorization": f"Bearer {api_key}"}
         inv["tested"] = True
+        inv["testable"] = True
 
         try:
             r = requests.get(url, headers=headers, timeout=20)
@@ -391,6 +431,11 @@ def main() -> None:
             9,
             "- Docs page reachable, but no machine-readable or safely executable endpoint inventory was discovered.",
         )
+    if remote_docs_http_403 and local_spec is None and not seed_discovered:
+        next_md.insert(
+            9,
+            "- Remote docs/spec fetch was blocked by HTTP 403. Provide ARKHAM_OPENAPI_FILE or config/endpoints_seed.json.",
+        )
 
     if not endpoint_inventory:
         endpoint_inventory = [
@@ -403,6 +448,10 @@ def main() -> None:
                 "enabled": False,
                 "params": {},
                 "tested": False,
+                "testable": False,
+                "required_params": [],
+                "optional_params": [],
+                "reason_not_tested": "No endpoint inventory source available.",
                 "status": "UNKNOWN",
                 "status_code": "UNKNOWN",
                 "error": "",

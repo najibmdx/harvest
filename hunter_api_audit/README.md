@@ -29,6 +29,7 @@ pip install -r requirements.txt
    - `ARKHAM_API_KEY`
    - `ARKHAM_API_BASE_URL`
    - `ARKHAM_DOCS_URL` (optional but strongly recommended for endpoint discovery)
+   - `ARKHAM_OPENAPI_FILE` (optional local OpenAPI/spec JSON file path)
 
 ## Run the audit
 ```bash
@@ -41,6 +42,12 @@ python scripts/run_audit.py
 - Add only verified read-only endpoints.
 - Set `"enabled": true` only for endpoints you want tested.
 - The auditor will never invent params and will skip non-GET endpoints.
+
+## OpenAPI local fallback (for blocked remote docs)
+- If `ARKHAM_DOCS_URL` is blocked or returns HTTP 403, manually download the Arkham OpenAPI/spec JSON and store it locally.
+- Set:
+  - `ARKHAM_OPENAPI_FILE=config/openapi.json`
+- The auditor will prioritize local OpenAPI loading before remote docs fetch.
 
 ## Output location
 All artifacts are written under:
