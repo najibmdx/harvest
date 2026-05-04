@@ -1,0 +1,9 @@
+{
+  "phase2_output_dir": "hunter_phase2/output",
+  "offline_only": true,
+  "allow_api_calls": false,
+  "allow_pnl_computation": false,
+  "wallet_labels": [],
+  "strict_trade_side_required": true,
+  "strict_cost_basis_required": true
+}
