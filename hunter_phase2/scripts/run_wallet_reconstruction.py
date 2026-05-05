@@ -65,12 +65,23 @@ def find_balance_payload(parsed: Dict[str, Any], payload: Any) -> Dict[str, Any]
     return {}
 
 
-def extract_addr_value(v: Any) -> str | None:
+
+
+def extract_party_fields(v: Any) -> tuple[str | None, str | None, str | None]:
     if isinstance(v, str):
-        return v
+        return v, None, None
     if isinstance(v, dict):
-        return v.get("address") or v.get("ownerAddress") or v.get("value")
-    return None
+        address = v.get("address")
+        ent = None
+        lbl = None
+        ae = v.get("arkhamEntity")
+        if isinstance(ae, dict):
+            ent = ae.get("name")
+        al = v.get("arkhamLabel")
+        if isinstance(al, dict):
+            lbl = al.get("name")
+        return address, ent, lbl
+    return None, None, None
 
 
 def main() -> None:
@@ -98,7 +109,7 @@ def main() -> None:
         available = w.get("available_evidence_categories", []); missing = w.get("missing_evidence_categories", [c for c in CATEGORIES if c not in available])
         ed = w.get("endpoint_request_diagnostics", {}); sm = w.get("sample_file_paths", {})
         diagnostics += ["", f"## {wl}", f"- available_evidence_categories: {', '.join(available) if available else 'none'}", f"- missing_evidence_categories: {', '.join(missing) if missing else 'none'}"]
-        s = {"tokens":set(),"chains":set(),"usd_chain":{},"top_token":{},"quote_times":set(),"missing_balance_fields":set(),"inbound":0,"outbound":0,"unknown":0,"transfer_like":0,"missing_flow_fields":set(),"usd_flow":set(),"known_cp":set(),"entity_cp":set(),"cex_cp":set(),"unknown_cp":0,"cp_missing":set(),"entity_name":None,"entity_id":None,"entity_type":None,"label_name":None,"identity_chains":set(),"balances_parsed":False,"transfer_events":0,"address_chain_count":0,"balance_chain_count":0,"balance_token_rows":0,"identity_records":0,"balance_snapshot_events":0}
+        s = {"tokens":set(),"chains":set(),"usd_chain":{},"top_token":{},"quote_times":set(),"missing_balance_fields":set(),"inbound":0,"outbound":0,"unknown":0,"transfer_like":0,"tx_hash_available_count":0,"from_to_available_count":0,"missing_flow_fields":set(),"usd_flow":set(),"known_cp":set(),"entity_cp":set(),"cex_cp":set(),"unknown_cp":0,"cp_missing":set(),"entity_name":None,"entity_id":None,"entity_type":None,"label_name":None,"identity_chains":set(),"balances_parsed":False,"transfer_events":0,"address_chain_count":0,"balance_chain_count":0,"balance_token_rows":0,"identity_records":0,"balance_snapshot_events":0}
 
         for cat in CATEGORIES:
             raw_ref = pick(ed.get(cat, {}) if isinstance(ed.get(cat), dict) else {}, ["sample_file_path"]) or sm.get(cat) or f"output/raw_samples/{wl}__{cat}.json"
@@ -174,13 +185,16 @@ def main() -> None:
                     recs = payload.get("transfers") or payload.get("items") or payload.get("result") or []
                     if isinstance(data, dict):
                         recs = data.get("transfers") or data.get("items") or data.get("data") or recs
+                if isinstance(payload, dict) and isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("transfers"), list):
+                    recs = payload["data"]["transfers"]
                 if isinstance(recs, dict):
                     recs = recs.get("items") or recs.get("data") or []
                 for r in recs if isinstance(recs,list) else []:
                     if not isinstance(r,dict): continue
                     s["transfer_like"] += 1; s["transfer_events"] += 1
                     fa_raw, ta_raw = pick(r,["fromAddress","from"]), pick(r,["toAddress","to"])
-                    fa, ta = extract_addr_value(fa_raw), extract_addr_value(ta_raw)
+                    fa, from_entity, from_label = extract_party_fields(fa_raw)
+                    ta, to_entity, to_label = extract_party_fields(ta_raw)
                     direction = None
                     if direction is None and wa:
                         if fa and str(fa).lower()==str(wa).lower(): direction="outbound"
@@ -189,29 +203,30 @@ def main() -> None:
                     elif direction=="outbound": s["outbound"] += 1
                     else: s["unknown"] += 1
                     usd = r.get("historicalUSD")
+                    tx_hash = pick(r, ["transactionHash", "txHash", "tx_hash"])
+                    if tx_hash: s["tx_hash_available_count"] += 1
+                    if fa and ta: s["from_to_available_count"] += 1
                     if usd is not None:
                         s["usd_flow"].add("historicalUSD")
                     cp = ta if direction == "outbound" else (fa if direction == "inbound" else None)
-                    cp_obj = ta_raw if direction == "outbound" else (fa_raw if direction == "inbound" else None)
-                    cp_entity = None
-                    if isinstance(cp_obj, dict):
-                        ae = cp_obj.get("arkhamEntity") or {}
-                        pe = cp_obj.get("predictedEntity") or {}
-                        cp_entity = ae.get("name") or pe.get("name")
+                    cp_obj = (ta_raw, to_entity, to_label) if direction == "outbound" else ((fa_raw, from_entity, from_label) if direction == "inbound" else (None, None, None))
+                    cp_entity = cp_obj[1]
                     timeline.append({
                         "wallet_label": wl, "address_redacted": ar, "event_type": "transfer", "source_category": "transfers",
-                        "timestamp": r.get("blockTimestamp"), "chain": r.get("chain"), "tx_hash": r.get("transactionHash"),
+                        "timestamp": r.get("blockTimestamp"), "chain": r.get("chain"), "tx_hash": tx_hash,
                         "token_symbol": r.get("tokenSymbol"), "token_id": r.get("tokenId"), "token_address": r.get("tokenAddress"),
                         "amount": r.get("unitValue"), "usd_value": usd, "direction": direction, "counterparty": cp,
-                        "counterparty_entity": cp_entity, "raw_source_file": str(resolved),
-                        "evidence_quality": "high" if r.get("transactionHash") and r.get("unitValue") and r.get("blockTimestamp") else "medium",
-                        "missing_fields": [f for f, v in {"timestamp": r.get("blockTimestamp"), "amount": r.get("unitValue"), "tx_hash": r.get("transactionHash")}.items() if v is None],
+                        "counterparty_entity": cp_entity, "from_address": fa, "to_address": ta,
+                        "from_entity": from_entity, "to_entity": to_entity, "from_label": from_label, "to_label": to_label,
+                        "txHash": tx_hash, "transactionHash": tx_hash, "fromAddress": fa, "toAddress": ta, "raw_source_file": str(resolved),
+                        "evidence_quality": "high" if tx_hash and r.get("unitValue") and r.get("blockTimestamp") else "medium",
+                        "missing_fields": [f for f, v in {"timestamp": r.get("blockTimestamp"), "amount": r.get("unitValue"), "tx_hash": tx_hash}.items() if v is None],
                     })
 
         diagnostics.append(f"- balances extraction counts: number of chains in addresses={s['address_chain_count']}, number of chains in balances={s['balance_chain_count']}, number of token rows extracted={s['balance_token_rows']}, number of identity records extracted={s['identity_records']}, number of balance_snapshot events generated={s['balance_snapshot_events']}")
         exposure_summary[wl] = {"tokens_observed":sorted(s["tokens"]),"chains_observed":sorted(s["chains"]),"total_usd_balance_by_chain":s["usd_chain"],"top_token_exposures_by_usd":dict(sorted(s["top_token"].items(), key=lambda x:x[1], reverse=True)[:10]),"quote_time_coverage":sorted(s["quote_times"]),"missing_balance_fields":sorted(s["missing_balance_fields"])}
         identity_summary[wl] = {"arkham_entity_evidence":bool(s["entity_name"] or s["entity_id"]),"arkham_label_evidence":bool(s["label_name"]),"entity_name":s["entity_name"],"entity_id":s["entity_id"],"entity_type":s["entity_type"],"cex_identification_evidence":str(s["entity_type"] or "").lower()=="cex","chains_with_identity_evidence":sorted(s["identity_chains"]),"missing_identity_evidence":[k for k,v in {"entity_name":s["entity_name"],"entity_id":s["entity_id"],"entity_type":s["entity_type"],"label_name":s["label_name"]}.items() if not v]}
-        flow_summary[wl] = {"flow_evidence_found":"flow" in available,"transfer_evidence_found":"transfers" in available,"number_of_transfer_like_records_parsed":s["transfer_like"],"inbound_count":s["inbound"],"outbound_count":s["outbound"],"unknown_direction_count":s["unknown"],"usd_flow_fields":sorted(s["usd_flow"]),"missing_flow_fields":sorted(s["missing_flow_fields"])}
+        flow_summary[wl] = {"flow_evidence_found":"flow" in available,"transfer_evidence_found":"transfers" in available,"number_of_transfer_like_records_parsed":s["transfer_like"],"tx_hash_available_count":s["tx_hash_available_count"],"from_to_available_count":s["from_to_available_count"],"inbound_count":s["inbound"],"outbound_count":s["outbound"],"unknown_direction_count":s["unknown"],"usd_flow_fields":sorted(s["usd_flow"]),"missing_flow_fields":sorted(s["missing_flow_fields"])}
         counterparty_summary[wl] = {"counterparty_evidence_found":"counterparties" in available,"known_counterparties":sorted(s["known_cp"]),"arkham_entity_counterparties":sorted(s["entity_cp"]),"cex_counterparties":sorted(s["cex_cp"]),"unknown_counterparties":s["unknown_cp"],"missing_fields":sorted(s["cp_missing"])}
         transfer_events = [e for e in timeline if e.get("wallet_label") == wl and e.get("event_type") == "transfer"]
         has_amounts = s["balance_token_rows"] > 0 or any(e.get("amount") is not None for e in transfer_events)
@@ -255,6 +270,30 @@ def main() -> None:
     coverage_total = sum(len([e for e in timeline if e.get("wallet_label") == wl]) for wl, *_ in coverage_rows)
     transfer_discovered = sum(1 for e in shape_diagnostics if e.get("category") == "transfers")
     transfer_events = sum(1 for e in timeline if e.get("event_type") == "transfer")
+    timeline_transfer_events = [e for e in timeline if e.get("event_type") == "transfer"]
+    raw_transfer_records = sum(v.get("number_of_transfer_like_records_parsed", 0) for v in flow_summary.values())
+    raw_records_with_tx_hash = sum(v.get("tx_hash_available_count", 0) for v in flow_summary.values())
+    timeline_with_tx = sum(1 for e in timeline_transfer_events if e.get("tx_hash"))
+    timeline_with_from = sum(1 for e in timeline_transfer_events if e.get("from_address"))
+    timeline_with_to = sum(1 for e in timeline_transfer_events if e.get("to_address"))
+    preservation_pass = "yes"
+    if raw_records_with_tx_hash > 0 and timeline_with_tx == 0:
+        preservation_pass = "no"
+
+    (out_dir / "transfer_field_preservation_check.md").write_text(
+        "\n".join([
+            "# Transfer Field Preservation Check",
+            "",
+            f"- raw transfer records found: {raw_transfer_records}",
+            f"- raw records with transactionHash: {raw_records_with_tx_hash}",
+            f"- timeline transfer events generated: {len(timeline_transfer_events)}",
+            f"- timeline transfer events with tx_hash: {timeline_with_tx}",
+            f"- timeline transfer events with from_address: {timeline_with_from}",
+            f"- timeline transfer events with to_address: {timeline_with_to}",
+            f"- preservation_pass: {preservation_pass}",
+        ]),
+        encoding="utf-8",
+    )
     balance_rows = sum(1 for e in timeline if e.get("event_type") == "balance_snapshot")
     identity_count = sum(1 for v in identity_summary.values() if v.get("arkham_entity_evidence"))
     pass_flag = "yes" if coverage_total == len(timeline) else "no"
@@ -267,6 +306,10 @@ def main() -> None:
             f"- identity record count: {identity_count}",
             f"- transfer records discovered: {transfer_discovered}",
             f"- transfer events generated: {transfer_events}",
+            f"- transfer events with tx_hash: {sum(1 for e in timeline if e.get('event_type')=='transfer' and e.get('tx_hash'))}",
+            f"- transfer events with from_address: {sum(1 for e in timeline if e.get('event_type')=='transfer' and e.get('from_address'))}",
+            f"- transfer events with to_address: {sum(1 for e in timeline if e.get('event_type')=='transfer' and e.get('to_address'))}",
+            f"- transfer_field_preservation_pass: {preservation_pass}",
             f"- inbound/outbound/unknown direction counts: {sum(v['inbound_count'] for v in flow_summary.values())}/{sum(v['outbound_count'] for v in flow_summary.values())}/{sum(v['unknown_direction_count'] for v in flow_summary.values())}",
             f"- phase2 recommendation verdict: {verdict}",
             f"- consistency_pass: {pass_flag}",

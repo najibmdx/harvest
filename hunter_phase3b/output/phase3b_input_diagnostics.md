@@ -1,0 +1,40 @@
+# Phase 3B Input Diagnostics
+
+- script path: /workspace/harvest/hunter_phase3b/scripts/run_evidence_expansion.py
+- current working directory: /workspace/harvest
+- resolved repo root: /workspace/harvest
+- resolved phase3b root: /workspace/harvest/hunter_phase3b
+- config paths attempted:
+  - /workspace/harvest/hunter_phase3b/config/phase3b_config.json
+  - /workspace/harvest/hunter_phase3b/config/phase3b_config.example.json
+- selected config path: /workspace/harvest/hunter_phase3b/config/phase3b_config.example.json
+- whether config exists: yes
+- offline_only value: False
+- allow_api_calls value: True
+- allowed_online_endpoint_families value: ['/tx/{hash}']
+- API capture enabled: yes
+- API capture disabled reason: n/a
+- env file path checked: /workspace/harvest/.env
+- env file exists: no
+- env parser used: manual
+- env keys discovered: []
+- ARKHAM_API_KEY discovered: no
+- ARKHAM_API_BASE_URL discovered: no
+- ARKHAM_AUTH_MODE discovered: no
+- phase2 output dir resolved: /workspace/harvest/hunter_phase2/output
+- phase3a output dir resolved: /workspace/harvest/hunter_phase3a/output
+- required Phase 2 files:
+  - no :: /workspace/harvest/hunter_phase2/output/wallet_activity_timeline.jsonl
+  - no :: /workspace/harvest/hunter_phase2/output/wallet_flow_summary.json
+  - no :: /workspace/harvest/hunter_phase2/output/wallet_identity_summary.json
+  - no :: /workspace/harvest/hunter_phase2/output/phase2_consistency_check.md
+- required Phase 3A files:
+  - yes :: /workspace/harvest/hunter_phase3a/output/pnl_mode_eligibility.json
+  - yes :: /workspace/harvest/hunter_phase3a/output/pnl_input_requirements.json
+  - yes :: /workspace/harvest/hunter_phase3a/output/phase3a_design_constraints.md
+- ARKHAM_API_KEY loaded: no
+- ARKHAM_API_BASE_URL loaded: no
+- ARKHAM_AUTH_MODE loaded: no
+- API key length: 0
+- API key prefix: 
+- API environment status: missing Arkham API environment variables
