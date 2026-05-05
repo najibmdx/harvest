@@ -14,6 +14,9 @@
 - allowed_online_endpoint_families value: ['/tx/{hash}']
 - API capture enabled: yes
 - API capture disabled reason: n/a
+- env file path checked: /workspace/harvest/.env
+- env file exists: no
+- env loading method: none
 - phase2 output dir resolved: /workspace/harvest/hunter_phase2/output
 - phase3a output dir resolved: /workspace/harvest/hunter_phase3a/output
 - required Phase 2 files:
@@ -25,4 +28,9 @@
   - yes :: /workspace/harvest/hunter_phase3a/output/pnl_mode_eligibility.json
   - yes :: /workspace/harvest/hunter_phase3a/output/pnl_input_requirements.json
   - yes :: /workspace/harvest/hunter_phase3a/output/phase3a_design_constraints.md
+- ARKHAM_API_KEY loaded: no
+- ARKHAM_API_BASE_URL loaded: no
+- ARKHAM_AUTH_MODE loaded: no
+- API key length: 0
+- API key prefix: 
 - API environment status: missing Arkham API environment variables

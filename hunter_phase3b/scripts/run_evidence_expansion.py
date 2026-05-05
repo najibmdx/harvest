@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -50,10 +51,34 @@ def resolve_repo_root(script_path: Path, cwd: Path) -> Path:
     return script_path.parents[2]
 
 
+def load_repo_env(repo_root: Path) -> dict[str, Any]:
+    env_path = repo_root / ".env"
+    loaded_via = "none"
+    if env_path.exists():
+        try:
+            from dotenv import load_dotenv  # type: ignore
+
+            load_dotenv(env_path, override=False)
+            loaded_via = "python-dotenv"
+        except Exception:
+            for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip().strip("'").strip('"')
+                if key and key not in os.environ:
+                    os.environ[key] = val
+            loaded_via = "fallback-parser"
+    return {"env_path": env_path, "exists": env_path.exists(), "loaded_via": loaded_via}
+
+
 def main() -> int:
     script_path = Path(__file__).resolve()
     cwd = Path.cwd().resolve()
     root = resolve_repo_root(script_path, cwd)
+    env_meta = load_repo_env(root)
     phase_root = root / "hunter_phase3b"
     out = phase_root / "output"
     raw_tx = out / "raw_tx_details"
@@ -102,6 +127,9 @@ def main() -> int:
         f"- allowed_online_endpoint_families value: {cfg.get('allowed_online_endpoint_families')}",
         f"- API capture enabled: {'yes' if capture_enabled else 'no'}",
         f"- API capture disabled reason: {capture_disable_reason if not capture_enabled else 'n/a'}",
+        f"- env file path checked: {env_meta['env_path']}",
+        f"- env file exists: {'yes' if env_meta['exists'] else 'no'}",
+        f"- env loading method: {env_meta['loaded_via']}",
         f"- phase2 output dir resolved: {p2}",
         f"- phase3a output dir resolved: {p3a}",
         "- required Phase 2 files:",
@@ -169,13 +197,26 @@ def main() -> int:
     plan, capture_index = [], []
     allow_calls = capture_enabled
     env = load_env() if (allow_calls and load_env) else {}
+    api_key = (env.get("api_key", "") if isinstance(env, dict) else "").strip()
+    base_url = (env.get("base_url", "") if isinstance(env, dict) else "").strip()
+    auth_mode = (env.get("auth_mode", "") if isinstance(env, dict) else "").strip()
+    diag_lines.extend(
+        [
+            f"- ARKHAM_API_KEY loaded: {'yes' if bool(api_key) else 'no'}",
+            f"- ARKHAM_API_BASE_URL loaded: {'yes' if bool(base_url) else 'no'}",
+            f"- ARKHAM_AUTH_MODE loaded: {'yes' if bool(auth_mode) else 'no'}",
+            f"- API key length: {len(api_key)}",
+            f"- API key prefix: {api_key[:4] if api_key else ''}",
+        ]
+    )
+    (out / "phase3b_input_diagnostics.md").write_text("\n".join(diag_lines) + "\n")
     env_missing = False
     headers = None
     if allow_calls and build_headers and env:
-        if not env.get("api_key") or not env.get("base_url"):
+        if not api_key or not base_url or not auth_mode:
             env_missing = True
         else:
-            headers, _ = build_headers(env.get("auth_mode", "api-key") or "api-key", env.get("api_key", ""))
+            headers, _ = build_headers(auth_mode or "api-key", api_key)
     elif allow_calls:
         env_missing = True
     if env_missing:
@@ -190,8 +231,8 @@ def main() -> int:
             idx = {"wallet_label": wl, "tx_hash": txh, "attempted": False, "status_code": None, "sample_file": None, "sanitized_error": None, "available_tx_fields": [], "possible_trade_evidence_found": False, "possible_fee_gas_fields_found": False}
             if allow_calls and env_missing:
                 rec["capture_status"] = "skipped"
-                rec["reason"] = "missing_arkham_env_vars"
-                idx["sanitized_error"] = "missing Arkham API environment variables"
+                rec["reason"] = "missing_arkham_env_vars_after_env_load"
+                idx["sanitized_error"] = "missing_arkham_env_vars_after_env_load"
             elif allow_calls and headers and env.get("base_url") and get_json:
                 try:
                     idx["attempted"] = True
