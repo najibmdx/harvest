@@ -16,7 +16,11 @@
 - API capture disabled reason: n/a
 - env file path checked: /workspace/harvest/.env
 - env file exists: no
-- env loading method: none
+- env parser used: manual
+- env keys discovered: []
+- ARKHAM_API_KEY discovered: no
+- ARKHAM_API_BASE_URL discovered: no
+- ARKHAM_AUTH_MODE discovered: no
 - phase2 output dir resolved: /workspace/harvest/hunter_phase2/output
 - phase3a output dir resolved: /workspace/harvest/hunter_phase3a/output
 - required Phase 2 files:

@@ -53,25 +53,36 @@ def resolve_repo_root(script_path: Path, cwd: Path) -> Path:
 
 def load_repo_env(repo_root: Path) -> dict[str, Any]:
     env_path = repo_root / ".env"
-    loaded_via = "none"
+    discovered_keys: set[str] = set()
+    issues: list[str] = []
     if env_path.exists():
-        try:
-            from dotenv import load_dotenv  # type: ignore
-
-            load_dotenv(env_path, override=False)
-            loaded_via = "python-dotenv"
-        except Exception:
-            for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                line = raw.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                key = key.strip()
-                val = val.strip().strip("'").strip('"')
-                if key and key not in os.environ:
-                    os.environ[key] = val
-            loaded_via = "fallback-parser"
-    return {"env_path": env_path, "exists": env_path.exists(), "loaded_via": loaded_via}
+        for i, raw in enumerate(env_path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.lower().startswith("set "):
+                line = line[4:].strip()
+            if "=" not in line:
+                issues.append(f"line {i}: missing equals")
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            val = val.strip().strip("'").strip('"')
+            if not key:
+                issues.append(f"line {i}: key mismatch")
+                continue
+            discovered_keys.add(key)
+            if not val:
+                issues.append(f"line {i}: blank value for {key}")
+                continue
+            os.environ[key] = val
+    return {
+        "env_path": env_path,
+        "exists": env_path.exists(),
+        "loaded_via": "manual",
+        "discovered_keys": sorted(discovered_keys),
+        "issues": issues,
+    }
 
 
 def main() -> int:
@@ -129,11 +140,19 @@ def main() -> int:
         f"- API capture disabled reason: {capture_disable_reason if not capture_enabled else 'n/a'}",
         f"- env file path checked: {env_meta['env_path']}",
         f"- env file exists: {'yes' if env_meta['exists'] else 'no'}",
-        f"- env loading method: {env_meta['loaded_via']}",
+        f"- env parser used: {env_meta['loaded_via']}",
+        f"- env keys discovered: {env_meta.get('discovered_keys', [])}",
+        f"- ARKHAM_API_KEY discovered: {'yes' if 'ARKHAM_API_KEY' in env_meta.get('discovered_keys', []) else 'no'}",
+        f"- ARKHAM_API_BASE_URL discovered: {'yes' if 'ARKHAM_API_BASE_URL' in env_meta.get('discovered_keys', []) else 'no'}",
+        f"- ARKHAM_AUTH_MODE discovered: {'yes' if 'ARKHAM_AUTH_MODE' in env_meta.get('discovered_keys', []) else 'no'}",
         f"- phase2 output dir resolved: {p2}",
         f"- phase3a output dir resolved: {p3a}",
         "- required Phase 2 files:",
     ])
+    if env_meta.get("issues"):
+        diag_lines.append("- env parse issues:")
+        for issue in env_meta["issues"]:
+            diag_lines.append(f"  - {issue}")
     for p in phase2_required:
         diag_lines.append(f"  - {'yes' if p.exists() else 'no'} :: {p}")
     diag_lines.append("- required Phase 3A files:")
