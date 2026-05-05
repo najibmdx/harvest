@@ -66,6 +66,17 @@ def main() -> int:
     if selected_config_path:
         cfg.update(load_json(selected_config_path))
 
+    capture_allowed_by_endpoint = "/tx/{hash}" in cfg.get("allowed_online_endpoint_families", [])
+    capture_enabled = bool((not cfg.get("offline_only", True)) and cfg.get("allow_api_calls", False) and capture_allowed_by_endpoint)
+    capture_disable_reason = "enabled"
+    if not capture_enabled:
+        if cfg.get("offline_only", True):
+            capture_disable_reason = "offline_only=true"
+        elif not cfg.get("allow_api_calls", False):
+            capture_disable_reason = "allow_api_calls=false"
+        else:
+            capture_disable_reason = "endpoint_not_allowed"
+
     p2 = root / cfg["phase2_output_dir"]
     p3a = root / cfg["phase3a_output_dir"]
     timeline_file = p2 / "wallet_activity_timeline.jsonl"
@@ -86,6 +97,11 @@ def main() -> int:
     diag_lines.extend([
         f"- selected config path: {selected_config_path if selected_config_path else 'in-memory-default'}",
         f"- whether config exists: {'yes' if selected_config_path else 'no'}",
+        f"- offline_only value: {cfg.get('offline_only')}",
+        f"- allow_api_calls value: {cfg.get('allow_api_calls')}",
+        f"- allowed_online_endpoint_families value: {cfg.get('allowed_online_endpoint_families')}",
+        f"- API capture enabled: {'yes' if capture_enabled else 'no'}",
+        f"- API capture disabled reason: {capture_disable_reason if not capture_enabled else 'n/a'}",
         f"- phase2 output dir resolved: {p2}",
         f"- phase3a output dir resolved: {p3a}",
         "- required Phase 2 files:",
@@ -151,25 +167,40 @@ def main() -> int:
         (out / "phase3b_transfer_field_diagnostics.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     plan, capture_index = [], []
-    allow_calls = bool(cfg.get("allow_api_calls", False) and not cfg.get("offline_only", False))
+    allow_calls = capture_enabled
     env = load_env() if (allow_calls and load_env) else {}
+    env_missing = False
     headers = None
     if allow_calls and build_headers and env:
-        headers, _ = build_headers(env.get("auth_mode", "api-key") or "api-key", env.get("api_key", ""))
+        if not env.get("api_key") or not env.get("base_url"):
+            env_missing = True
+        else:
+            headers, _ = build_headers(env.get("auth_mode", "api-key") or "api-key", env.get("api_key", ""))
+    elif allow_calls:
+        env_missing = True
+    if env_missing:
+        diag_lines.append("- API environment status: missing Arkham API environment variables")
+        (out / "phase3b_input_diagnostics.md").write_text("\n".join(diag_lines) + "\n")
 
     tx_detail_map: dict[tuple[str, str], dict[str, Any]] = {}
     for inv in tx_inventory:
         wl = inv["wallet_label"]
         for txh in inv["tx_hashes"][: int(cfg.get("max_tx_hashes_per_wallet", 100))]:
-            rec = {"wallet_label": wl, "tx_hash": txh, "endpoint": "/tx/{hash}", "allowed_by_config": allow_calls, "capture_status": "planned", "reason": "config_allows" if allow_calls else "api_calls_disabled_by_config"}
+            rec = {"wallet_label": wl, "tx_hash": txh, "endpoint": "/tx/{hash}", "allowed_by_config": allow_calls, "capture_status": "planned", "reason": "config_allows" if allow_calls else capture_disable_reason}
             idx = {"wallet_label": wl, "tx_hash": txh, "attempted": False, "status_code": None, "sample_file": None, "sanitized_error": None, "available_tx_fields": [], "possible_trade_evidence_found": False, "possible_fee_gas_fields_found": False}
-            if allow_calls and headers and env.get("base_url") and get_json:
+            if allow_calls and env_missing:
+                rec["capture_status"] = "skipped"
+                rec["reason"] = "missing_arkham_env_vars"
+                idx["sanitized_error"] = "missing Arkham API environment variables"
+            elif allow_calls and headers and env.get("base_url") and get_json:
                 try:
                     idx["attempted"] = True
                     res = get_json(env["base_url"], "/tx/{hash}", headers=headers, path_params={"hash": txh})
                     idx["status_code"] = res.get("status_code")
                     body = res.get("body", {})
                     idx["available_tx_fields"] = sorted(body.keys()) if isinstance(body, dict) else []
+                    idx["possible_trade_evidence_found"] = tx_has_trade_side(body if isinstance(body, dict) else {})
+                    idx["possible_fee_gas_fields_found"] = tx_has_fee_gas(body if isinstance(body, dict) else {})[0]
                     if idx["status_code"] == 200:
                         sample = raw_tx / f"{wl}__{txh}.json"
                         sample.write_text(json.dumps(body, indent=2, sort_keys=True))
@@ -258,7 +289,11 @@ def main() -> int:
     phase3a_found = all(f.exists() for f in phase3a_required)
     direction_align = all((d["inbound_count"] + d["outbound_count"] + d["unknown_direction_count"]) == d["transfer_events_seen"] for d in direction_resolution)
     consistency_pass = (not realized_allowed) and direction_align
-    consistency = f"# Phase 3B Consistency Check\n\n- Phase 2 files found: {'yes' if phase2_found else 'no'}\n- Phase 3A files found: {'yes' if phase3a_found else 'no'}\n- wallet count: {wallets_processed}\n- transfer event count: {transfers_processed}\n- tx hash count: {tx_hashes}\n- tx detail capture attempted: {'yes' if any(i['attempted'] for i in capture_index) else 'no'}\n- PnL numbers generated: no\n- profitability labels generated: no\n- realized PnL allowed: {'yes' if realized_allowed else 'no'}\n- direction counts align: {'yes' if direction_align else 'no'}\n- cost basis classification exists: {'yes' if (out/'cost_basis_evidence_report.md').exists() else 'no'}\n- consistency_pass: {'yes' if consistency_pass else 'no'}\n"
+    attempted_count = sum(1 for i in capture_index if i["attempted"])
+    captured_count = sum(1 for p in plan if p["capture_status"] == "captured")
+    failed_count = sum(1 for p in plan if p["capture_status"] == "failed")
+    skipped_count = sum(1 for p in plan if p["capture_status"] == "skipped")
+    consistency = f"# Phase 3B Consistency Check\n\n- Phase 2 files found: {'yes' if phase2_found else 'no'}\n- Phase 3A files found: {'yes' if phase3a_found else 'no'}\n- wallet count: {wallets_processed}\n- transfer event count: {transfers_processed}\n- tx hash count: {tx_hashes}\n- tx detail capture attempted: {'yes' if any(i['attempted'] for i in capture_index) else 'no'}\n- tx detail attempted count: {attempted_count}\n- tx detail captured count: {captured_count}\n- tx detail failed count: {failed_count}\n- tx detail skipped count: {skipped_count}\n- config capture enabled: {'yes' if capture_enabled else 'no'}\n- PnL numbers generated: no\n- profitability labels generated: no\n- realized PnL allowed: {'yes' if realized_allowed else 'no'}\n- direction counts align: {'yes' if direction_align else 'no'}\n- cost basis classification exists: {'yes' if (out/'cost_basis_evidence_report.md').exists() else 'no'}\n- consistency_pass: {'yes' if consistency_pass else 'no'}\n"
     (out / "phase3b_consistency_check.md").write_text(consistency)
 
     verdict = "B" if phase2_found and phase3a_found else "C"

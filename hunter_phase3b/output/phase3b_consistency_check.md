@@ -6,6 +6,11 @@
 - transfer event count: 0
 - tx hash count: 0
 - tx detail capture attempted: no
+- tx detail attempted count: 0
+- tx detail captured count: 0
+- tx detail failed count: 0
+- tx detail skipped count: 0
+- config capture enabled: yes
 - PnL numbers generated: no
 - profitability labels generated: no
 - realized PnL allowed: no
